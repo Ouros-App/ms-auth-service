@@ -1,0 +1,29 @@
+import bcrypt
+
+
+# Valid public bcrypt hash used only to make unknown-user checks perform one
+# expensive password comparison too. It is not a credential and carries no secret.
+_DUMMY_BCRYPT_HASH = "$2b$10$GfDSGKkLH9.gV2IJcb8UdeXQzoC9V8VLgL.NmEMKlyaSZeN0cHCv6"
+
+
+def _normalize_bcrypt_prefix(encoded_password: str) -> str:
+    if encoded_password.startswith("$2y$"):
+        return "$2b$" + encoded_password[4:]
+    return encoded_password
+
+
+def verify_password(raw_password: str, encoded_password: str) -> bool:
+    """Verify legacy Spring bcrypt hashes without generating a new credential."""
+
+    try:
+        password_bytes = raw_password.encode("utf-8")
+        encoded_bytes = _normalize_bcrypt_prefix(encoded_password).encode("utf-8")
+        return bcrypt.checkpw(password_bytes, encoded_bytes)
+    except (ValueError, TypeError):
+        return False
+
+
+def burn_dummy_password_check(raw_password: str) -> None:
+    """Keep missing-user requests closer to the cost of a real login attempt."""
+
+    verify_password(raw_password, _DUMMY_BCRYPT_HASH)
