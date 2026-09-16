@@ -1,9 +1,9 @@
 import bcrypt
 
 
-# Valid public bcrypt hash used only to make unknown-user checks perform one
-# expensive password comparison too. It is not a credential and carries no secret.
-_DUMMY_BCRYPT_HASH = "$2b$10$GfDSGKkLH9.gV2IJcb8UdeXQzoC9V8VLgL.NmEMKlyaSZeN0cHCv6"
+# Valid public bcrypt hash generated only for missing-user timing work.
+# It is not tied to any Ouros account and carries no secret.
+_DUMMY_BCRYPT_HASH = "$2y$10$RQdEwwOeMY0qJtHGr2Aec.zs8DqgBCpb3dNFPmbvTARxWRv6RF3HO"
 
 
 def _normalize_bcrypt_prefix(encoded_password: str) -> str:
