@@ -26,9 +26,14 @@ class RateLimiter:
 
     Redis is used when REDIS_URL is configured so counters are shared across
     replicas. Without Redis, or during a temporary Redis outage, the service
-    falls back to an in-process limiter so credential verification is still
-    protected on each running instance.
+    falls back to a bounded in-process limiter so credential verification is
+    still protected on each running instance.
     """
+
+    _REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
+    _REDIS_OPERATION_TIMEOUT_SECONDS = 2.5
+    _MEMORY_MAX_ENTRIES = 10_000
+    _MEMORY_CLEANUP_INTERVAL = 128
 
     _REDIS_SCRIPT = """
 local current = redis.call('INCR', KEYS[1])
@@ -40,11 +45,13 @@ return {current, ttl}
 """
 
     def __init__(self, settings: Settings) -> None:
+        """Build the limiter from application rate-limit settings."""
         self._redis_url = settings.redis_url
         self._redis: Redis | None = None
         self._redis_lock = asyncio.Lock()
         self._memory: dict[str, tuple[int, float]] = {}
         self._memory_lock = asyncio.Lock()
+        self._memory_operations = 0
         self._rules = (
             RateLimitRule(
                 name="ip-burst",
@@ -85,9 +92,15 @@ return {current, ttl}
         async with self._redis_lock:
             if self._redis is not None:
                 return
-            client = Redis.from_url(self._redis_url, decode_responses=True)
+            client = Redis.from_url(
+                self._redis_url,
+                decode_responses=True,
+                socket_connect_timeout=self._REDIS_SOCKET_TIMEOUT_SECONDS,
+                socket_timeout=self._REDIS_SOCKET_TIMEOUT_SECONDS,
+            )
             try:
-                await client.ping()
+                async with asyncio.timeout(self._REDIS_OPERATION_TIMEOUT_SECONDS):
+                    await client.ping()
             except (RedisError, OSError, TimeoutError):
                 await client.aclose()
                 raise
@@ -111,7 +124,8 @@ return {current, ttl}
         if self._redis is None:
             return False
         try:
-            return bool(await self._redis.ping())
+            async with asyncio.timeout(self._REDIS_OPERATION_TIMEOUT_SECONDS):
+                return bool(await self._redis.ping())
         except (RedisError, OSError, TimeoutError):
             return False
 
@@ -153,12 +167,13 @@ return {current, ttl}
 
         if self._redis is not None:
             try:
-                result = await self._redis.eval(
-                    self._REDIS_SCRIPT,
-                    1,
-                    key,
-                    window_seconds,
-                )
+                async with asyncio.timeout(self._REDIS_OPERATION_TIMEOUT_SECONDS):
+                    result = await self._redis.eval(
+                        self._REDIS_SCRIPT,
+                        1,
+                        key,
+                        window_seconds,
+                    )
                 count = int(result[0])
                 ttl = max(int(result[1]), 1)
                 return count, ttl
@@ -167,6 +182,14 @@ return {current, ttl}
 
         now = monotonic()
         async with self._memory_lock:
+            self._memory_operations += 1
+            if (
+                self._memory_operations >= self._MEMORY_CLEANUP_INTERVAL
+                or len(self._memory) >= self._MEMORY_MAX_ENTRIES
+            ):
+                self._cleanup_memory(now)
+                self._memory_operations = 0
+
             current = self._memory.get(key)
             if current is None or current[1] <= now:
                 count = 1
@@ -174,10 +197,28 @@ return {current, ttl}
             else:
                 count = current[0] + 1
                 expires_at = current[1]
+
+            if key not in self._memory and len(self._memory) >= self._MEMORY_MAX_ENTRIES:
+                self._evict_soonest_expiring_entry()
             self._memory[key] = (count, expires_at)
 
         retry_after = max(int(expires_at - now), 1)
         return count, retry_after
+
+    def _cleanup_memory(self, now: float) -> None:
+        """Remove expired fallback counters during periodic maintenance."""
+        expired_keys = [
+            key for key, (_count, expires_at) in self._memory.items() if expires_at <= now
+        ]
+        for key in expired_keys:
+            del self._memory[key]
+
+    def _evict_soonest_expiring_entry(self) -> None:
+        """Keep the fallback map bounded when unique keys arrive continuously."""
+        if not self._memory:
+            return
+        key_to_evict = min(self._memory, key=lambda key: self._memory[key][1])
+        del self._memory[key_to_evict]
 
     @staticmethod
     def _digest(value: str) -> str:
@@ -186,15 +227,13 @@ return {current, ttl}
 
     @staticmethod
     def _client_ip(request: Request) -> str:
-        """Resolve the originating address from the deployment proxy headers."""
-        cloudflare_ip = request.headers.get("cf-connecting-ip")
-        if cloudflare_ip:
-            return cloudflare_ip.strip()
+        """Use the ASGI-resolved peer address instead of untrusted raw headers.
 
-        forwarded_for = request.headers.get("x-forwarded-for")
-        if forwarded_for:
-            return forwarded_for.split(",", maxsplit=1)[0].strip()
-
+        Proxy headers must be validated by the ASGI server/ingress before they
+        are allowed to replace ``request.client``. Reading X-Forwarded-For or
+        CF-Connecting-IP directly here would let a direct client spoof the
+        limiter key.
+        """
         if request.client is not None:
             return request.client.host
         return "unknown"
