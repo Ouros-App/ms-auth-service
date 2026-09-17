@@ -18,7 +18,7 @@ class AccountType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class StoredIdentity:
-    legacy_id: int
+    database_id: int
     email: str
     password_hash: str
     account_type: AccountType
@@ -26,7 +26,3 @@ class StoredIdentity:
     farm_id: int | None = None
     enterprise_id: int | None = None
     first_access: bool | None = None
-
-    @property
-    def legacy_subject(self) -> str:
-        return f"{self.account_type.value}:{self.legacy_id}"
