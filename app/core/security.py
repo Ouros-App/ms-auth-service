@@ -1,8 +1,8 @@
 import bcrypt
 
-# Valid public bcrypt hash generated only for missing-user timing work.
-# It is not tied to any Ouros account and carries no secret.
-_DUMMY_BCRYPT_HASH = "$2y$10$RQdEwwOeMY0qJtHGr2Aec.zs8DqgBCpb3dNFPmbvTARxWRv6RF3HO"
+# Generate an ephemeral timing-only bcrypt hash at process start instead of
+# storing a hash-shaped literal in source control. It is never tied to a user.
+_DUMMY_BCRYPT_HASH = bcrypt.hashpw(b"timing-only", bcrypt.gensalt(rounds=10)).decode()
 
 
 def _normalize_bcrypt_prefix(encoded_password: str) -> str:
