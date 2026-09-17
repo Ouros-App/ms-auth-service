@@ -1,8 +1,13 @@
+import secrets
+
 import bcrypt
 
-# Generate an ephemeral timing-only bcrypt hash at process start instead of
-# storing a hash-shaped literal in source control. It is never tied to a user.
-_DUMMY_BCRYPT_HASH = bcrypt.hashpw(b"timing-only", bcrypt.gensalt(rounds=10)).decode()
+# Generate an ephemeral timing-only bcrypt hash at process start from random
+# bytes so no password-like literal or reusable credential is stored in source.
+_DUMMY_BCRYPT_HASH = bcrypt.hashpw(
+    secrets.token_bytes(32),
+    bcrypt.gensalt(),
+).decode()
 
 
 def _normalize_bcrypt_prefix(encoded_password: str) -> str:
