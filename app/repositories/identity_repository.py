@@ -1,7 +1,6 @@
 from app.core.database import Database
 from app.models.identity import AccountType, StoredIdentity
 
-
 _FIND_IDENTITIES_SQL = """
 SELECT *
 FROM (
@@ -51,6 +50,8 @@ ORDER BY account_type, database_id
 
 
 class IdentityRepository:
+    """Read identities from the existing Ouros production tables."""
+
     def __init__(self, database: Database) -> None:
         self._database = database
 
@@ -59,6 +60,7 @@ class IdentityRepository:
         email: str,
         account_type: AccountType | None = None,
     ) -> list[StoredIdentity]:
+        """Return identities whose normalized email matches the supplied value."""
         async with self._database.connection() as connection:
             rows = await connection.fetch(
                 _FIND_IDENTITIES_SQL,
