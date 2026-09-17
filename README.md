@@ -37,7 +37,7 @@ The password column stays in PostgreSQL for this migration phase. Existing Sprin
 GET /health
 ```
 
-Returns `200` when the process is alive. It deliberately does not depend on PostgreSQL.
+Returns `200` when the process is alive. It deliberately does not depend on PostgreSQL or Redis.
 
 ### Readiness
 
@@ -45,7 +45,7 @@ Returns `200` when the process is alive. It deliberately does not depend on Post
 GET /ready
 ```
 
-Returns `200` only when the PostgreSQL connection is usable.
+Returns `200` only when PostgreSQL is usable and, when `REDIS_URL` is configured, the distributed rate-limit backend is reachable.
 
 ### Verify credentials
 
@@ -85,10 +85,28 @@ Success:
 
 Invalid email/password always returns the same generic `401` response.
 
+## Rate limiting
+
+Credential verification is rate limited before database password verification, reducing brute-force, credential-stuffing and bcrypt CPU-abuse risk.
+
+Default limits for `POST /v1/auth/credentials/verify`:
+
+```text
+per IP:     3 attempts / 10 seconds
+per IP:     5 attempts / minute
+per IP:    20 attempts / 15 minutes
+per email:  5 attempts / 15 minutes
+```
+
+Exceeded limits return `429 Too Many Requests` with a `Retry-After` header. Email and IP values are SHA-256 hashed before being used in rate-limit keys.
+
+When `REDIS_URL` is configured, counters live in Redis and are shared across replicas. Without Redis, the service uses an in-process fallback so local development and single-instance deployments remain protected.
+
 ## Security properties
 
 - Password hashes are read only for verification and never leave the service layer.
 - Missing-user attempts still execute a bcrypt comparison to reduce trivial timing differences.
+- Credential verification is rate limited before bcrypt verification.
 - Database connections set `default_transaction_read_only=on` and each repository operation runs inside a read-only transaction.
 - Production should also use a dedicated PostgreSQL role with only `SELECT` permission on the three identity tables. Application-level read-only mode is defense in depth, not a replacement for DB grants.
 - The API does not log passwords and Pydantic represents the request password as `SecretStr`.
@@ -121,10 +139,11 @@ INFISICAL_SECRET_PATH=/ms-auth-service
 
 The service authenticates with `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET`, loads all secrets from `INFISICAL_SECRET_PATH`, and injects them into the process environment before application settings are parsed.
 
-For M2, the application secret that should exist inside `/ms-auth-service` is:
+Application secrets inside `/ms-auth-service`:
 
 ```text
 DATABASE_URL
+REDIS_URL       # optional but recommended in production
 ```
 
 So the production flow is:
@@ -133,12 +152,12 @@ So the production flow is:
 Discloud env
   -> Infisical Universal Auth bootstrap
   -> Infisical /ms-auth-service
-  -> DATABASE_URL
+  -> DATABASE_URL + optional REDIS_URL
   -> Pydantic Settings
-  -> PostgreSQL
+  -> PostgreSQL + distributed rate limiter
 ```
 
-If no Infisical bootstrap values are configured, the loader is skipped. This keeps local development and CI compatible with a direct `DATABASE_URL` environment variable. A partial Infisical configuration fails fast instead of silently starting with missing secrets.
+If no Infisical bootstrap values are configured, the loader is skipped. This keeps local development and CI compatible with direct environment variables. A partial Infisical configuration fails fast instead of silently starting with missing secrets.
 
 Additional runtime configuration:
 
@@ -148,6 +167,11 @@ APP_PORT=8000
 DATABASE_MIN_POOL_SIZE=1
 DATABASE_MAX_POOL_SIZE=10
 DATABASE_COMMAND_TIMEOUT_SECONDS=5
+AUTH_RATE_LIMIT_IP_BURST=3
+AUTH_RATE_LIMIT_IP_BURST_WINDOW_SECONDS=10
+AUTH_RATE_LIMIT_IP_PER_MINUTE=5
+AUTH_RATE_LIMIT_IP_PER_15_MINUTES=20
+AUTH_RATE_LIMIT_EMAIL_PER_15_MINUTES=5
 ```
 
 Never commit production credentials.
@@ -169,7 +193,7 @@ Swagger UI is available at `/docs`.
 pytest
 ```
 
-The suite covers successful and rejected authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility, Infisical loading and HTTP error behavior.
+The suite covers successful and rejected authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility, Infisical loading, HTTP error behavior and rate limiting.
 
 ## Structure
 
@@ -181,6 +205,7 @@ app/
 │   ├── database.py
 │   ├── errors.py
 │   ├── infisical.py
+│   ├── rate_limit.py
 │   └── security.py
 ├── models/identity.py
 ├── repositories/identity_repository.py
