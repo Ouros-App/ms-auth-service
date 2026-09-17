@@ -1,66 +1,182 @@
-# ms-fastapi-template
+# Ouros Auth Service
 
 <!-- REPO-METADATA:START -->
 <div align="center">
 
-[![Repo Size](https://img.shields.io/github/repo-size/Ouros-App/ms-fastapi-template?style=flat-square&label=REPO%20SIZE)](https://github.com/Ouros-App/ms-fastapi-template)
-[![Languages](https://img.shields.io/github/languages/count/Ouros-App/ms-fastapi-template?style=flat-square&label=LANGUAGES)](https://github.com/Ouros-App/ms-fastapi-template/languages)
-[![Forks](https://img.shields.io/github/forks/Ouros-App/ms-fastapi-template?style=flat-square&label=FORKS)](https://github.com/Ouros-App/ms-fastapi-template/network/members)
-[![Issues](https://img.shields.io/github/issues/Ouros-App/ms-fastapi-template?style=flat-square&label=ISSUES)](https://github.com/Ouros-App/ms-fastapi-template/issues)
-[![Pull Requests](https://img.shields.io/github/issues-pr/Ouros-App/ms-fastapi-template?style=flat-square&label=PULL%20REQUESTS)](https://github.com/Ouros-App/ms-fastapi-template/pulls)
+[![Repo Size](https://img.shields.io/github/repo-size/Ouros-App/ms-auth-service?style=flat-square&label=REPO%20SIZE)](https://github.com/Ouros-App/ms-auth-service)
+[![Languages](https://img.shields.io/github/languages/count/Ouros-App/ms-auth-service?style=flat-square&label=LANGUAGES)](https://github.com/Ouros-App/ms-auth-service/languages)
+[![Issues](https://img.shields.io/github/issues/Ouros-App/ms-auth-service?style=flat-square&label=ISSUES)](https://github.com/Ouros-App/ms-auth-service/issues)
+[![Pull Requests](https://img.shields.io/github/issues-pr/Ouros-App/ms-auth-service?style=flat-square&label=PULL%20REQUESTS)](https://github.com/Ouros-App/ms-auth-service/pulls)
 
 </div>
 <!-- REPO-METADATA:END -->
 
-Template mínimo para iniciar um microsserviço com FastAPI.
+Central authentication service for Ouros.
 
-## Status e escopo
+## Current milestone: M2
 
-A implementação atual expõe apenas uma API básica com dois endpoints:
+This service currently owns **credential verification against the production PostgreSQL identity tables**. It does not mint an Ouros JWT yet.
 
-- `GET /`: retorna `{"message": "FastAPI microservice is running"}`.
-- `GET /health`: retorna `{"status": "ok"}`.
+That boundary is intentional: the old Spring API signs its own JWT after validating bcrypt passwords, while the target architecture uses Keycloak as the token issuer. M2 moves password validation out of application APIs without introducing a second homemade token format.
 
-O projeto já contém a separação inicial entre API, configuração, schemas, serviços, repositórios e modelos. As pastas `models`, `repositories` e `services` ainda não possuem implementação além de seus arquivos de pacote.
+### Supported identities
 
-## Recursos e componentes
+| Account type | Source table | Keycloak realm role |
+| --- | --- | --- |
+| `farm_owner` | `farm_owners` | `farm_owner` |
+| `company_employee` | `company_employees` | `company_employee` |
+| `admin` | `adms` | `admin` |
 
-- FastAPI com metadados definidos em `app/core/config.py`.
-- Schemas Pydantic em `app/schemas/common.py`.
-- Rotas registradas por `app/main.py`.
-- `Dockerfile` para execução com Uvicorn.
-- `run.sh` para criar, recriar, remover e listar containers Docker.
-- `run_compose.sh` para gerar arquivos Compose temporários e executar instâncias numeradas.
+The password column stays in PostgreSQL for this migration phase. Existing Spring bcrypt hashes are verified in place and are never returned by the API.
 
-## Pré-requisitos
+## API
 
-- Python e `pip`.
-- Docker para os fluxos baseados em container.
-- Bash para executar `run.sh` e `run_compose.sh`.
+### Liveness
 
-As dependências Python estão fixadas em:
+```http
+GET /health
+```
 
-- `fastapi==0.115.6`
-- `uvicorn[standard]==0.34.0`
+Returns `200` when the process is alive. It deliberately does not depend on PostgreSQL or Redis.
 
-## Configuração
+### Readiness
 
-O arquivo `.env.example` contém:
+```http
+GET /ready
+```
+
+Returns `200` only when PostgreSQL is usable and, when `REDIS_URL` is configured, the distributed rate-limit backend is reachable.
+
+### Verify credentials
+
+```http
+POST /v1/auth/credentials/verify
+Content-Type: application/json
+```
+
+```json
+{
+  "email": "user@example.com",
+  "password": "plain-text-from-the-login-form"
+}
+```
+
+`account_type` is optional. By default, the service detects the account type automatically by checking the supported identity tables and validating the supplied password against the matching candidates. If the same credentials match more than one identity, the request returns `409` and the client may retry with `account_type` to disambiguate.
+
+Success:
+
+```json
+{
+  "authenticated": true,
+  "identity": {
+    "id": 42,
+    "email": "user@example.com",
+    "account_type": "farm_owner",
+    "realm_role": "farm_owner",
+    "name": "Example User",
+    "farm_id": 7,
+    "enterprise_id": null,
+    "first_access": false
+  }
+}
+```
+
+`identity.id` is the real `id` from the production database table and remains the business/database identifier used by the existing Ouros services. A future Keycloak subject identifier is a separate authentication identifier and must not replace or be confused with this database `id`.
+
+Invalid email/password always returns the same generic `401` response.
+
+## Rate limiting
+
+Credential verification is rate limited before database password verification, reducing brute-force, credential-stuffing and bcrypt CPU-abuse risk.
+
+Default limits for `POST /v1/auth/credentials/verify`:
+
+```text
+per IP:     3 attempts / 10 seconds
+per IP:     5 attempts / minute
+per IP:    20 attempts / 15 minutes
+per email:  5 attempts / 15 minutes
+```
+
+Exceeded limits return `429 Too Many Requests` with a `Retry-After` header. Email and IP values are SHA-256 hashed before being used in rate-limit keys.
+
+When `REDIS_URL` is configured, counters live in Redis and are shared across replicas. Without Redis, the service uses an in-process fallback so local development and single-instance deployments remain protected.
+
+## Security properties
+
+- Password hashes are read only for verification and never leave the service layer.
+- Missing-user attempts still execute a bcrypt comparison to reduce trivial timing differences.
+- Credential verification is rate limited before bcrypt verification.
+- Database connections set `default_transaction_read_only=on` and each repository operation runs inside a read-only transaction.
+- Production should also use a dedicated PostgreSQL role with only `SELECT` permission on the three identity tables. Application-level read-only mode is defense in depth, not a replacement for DB grants.
+- The API does not log passwords and Pydantic represents the request password as `SecretStr`.
+- No JWT is generated locally in this service.
+
+## Why M2 stops before token issuance
+
+Keycloak `client_credentials` represents a service account, not the logged-in user. A user access token must be issued only after Keycloak can authenticate or trust the corresponding user identity. The next milestone will add that bridge deliberately rather than impersonating a user with a machine token.
+
+The intended M3 contract is:
+
+```text
+mobile/web -> ms-auth-service -> credential authority -> Keycloak -> access + refresh token
+```
+
+The exact Keycloak credential-federation mechanism is kept outside this PR so password authority is not silently duplicated into Keycloak.
+
+## Configuration and Infisical
+
+Production runtime secrets are loaded from Infisical before Pydantic `Settings` is created. The bootstrap connection follows the Ouros Universal Auth convention used in deployment:
 
 ```dotenv
+INFISICAL_SITE_URL=https://app.infisical.com
+INFISICAL_CLIENT_ID=
+INFISICAL_CLIENT_SECRET=
+INFISICAL_PROJECT_ID=
+INFISICAL_ENVIRONMENT=prod
+INFISICAL_SECRET_PATH=/ms-auth-service
+```
+
+The service authenticates with `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET`, loads all secrets from `INFISICAL_SECRET_PATH`, and injects them into the process environment before application settings are parsed.
+
+Application secrets inside `/ms-auth-service`:
+
+```text
+DATABASE_URL
+REDIS_URL       # optional but recommended in production
+```
+
+So the production flow is:
+
+```text
+Discloud env
+  -> Infisical Universal Auth bootstrap
+  -> Infisical /ms-auth-service
+  -> DATABASE_URL + optional REDIS_URL
+  -> Pydantic Settings
+  -> PostgreSQL + distributed rate limiter
+```
+
+If no Infisical bootstrap values are configured, the loader is skipped. This keeps local development and CI compatible with direct environment variables. A partial Infisical configuration fails fast instead of silently starting with missing secrets.
+
+Additional runtime configuration:
+
+```dotenv
+APP_NAME=ouros-auth-service
 APP_PORT=8000
-APP_NAME=fastapi_microservice
+DATABASE_MIN_POOL_SIZE=1
+DATABASE_MAX_POOL_SIZE=10
+DATABASE_COMMAND_TIMEOUT_SECONDS=5
+AUTH_RATE_LIMIT_IP_BURST=3
+AUTH_RATE_LIMIT_IP_BURST_WINDOW_SECONDS=10
+AUTH_RATE_LIMIT_IP_PER_MINUTE=5
+AUTH_RATE_LIMIT_IP_PER_15_MINUTES=20
+AUTH_RATE_LIMIT_EMAIL_PER_15_MINUTES=5
 ```
 
-Copie-o para `.env` quando usar os scripts ou o `Dockerfile`:
+Never commit production credentials.
 
-```bash
-cp .env.example .env
-```
-
-`APP_PORT` e `APP_NAME` são usados pelos scripts e pelo container. Os metadados da aplicação definidos em `Settings` ainda são constantes no código.
-
-## Instalação e execução local
+## Run locally
 
 ```bash
 python -m venv .venv
@@ -69,75 +185,53 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-A aplicação fica disponível em `http://localhost:8000`. A documentação interativa do FastAPI fica em `/docs` e o schema OpenAPI em `/openapi.json`.
+Swagger UI is available at `/docs`.
 
-## Execução com Docker
-
-`run.sh` exige um `.env` com `APP_NAME` e oferece os modos abaixo:
+## Tests
 
 ```bash
-./run.sh
-./run.sh --reboot NUMERO
-./run.sh --remove NUMERO
-./run.sh --list
+pytest
 ```
 
-`run_compose.sh` também exige `.env` com `APP_NAME`, detecta `docker compose` ou `docker-compose`, gera o Compose da instância e aceita:
+The suite covers successful and rejected authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility, Infisical loading, HTTP error behavior and rate limiting.
 
-```bash
-./run_compose.sh
-./run_compose.sh --rebuild
-./run_compose.sh --rebuild NUMERO
-./run_compose.sh --reboot NUMERO
-./run_compose.sh --bind NUMERO
-./run_compose.sh --help
-```
-
-Não há um `docker-compose.yml` estático neste repositório. O script `run_compose.sh` gera um arquivo temporário para cada instância.
-
-## Testes e qualidade
-
-O diretório `tests/` contém apenas `__init__.py`; não há casos de teste automatizados implementados no estado atual.
-
-## Estrutura do projeto
+## Structure
 
 ```text
-.
-├── app/
-│   ├── api/routes.py
-│   ├── core/config.py
-│   ├── models/
-│   ├── repositories/
-│   ├── schemas/common.py
-│   ├── services/
-│   └── main.py
-├── tests/
-├── .env.example
-├── Dockerfile
-├── requirements.txt
-├── run.sh
-└── run_compose.sh
+app/
+├── api/routes.py
+├── core/
+│   ├── config.py
+│   ├── database.py
+│   ├── errors.py
+│   ├── infisical.py
+│   ├── rate_limit.py
+│   └── security.py
+├── models/identity.py
+├── repositories/identity_repository.py
+├── schemas/
+│   ├── auth.py
+│   └── common.py
+├── services/auth_service.py
+└── main.py
 ```
 
-## Limitações conhecidas
+## Migration map
 
-O `Dockerfile` atualmente copia um arquivo `.env` e valida arquivos em `app/templates/workflows/`, mas esses caminhos não aparecem na árvore atual do repositório. Portanto, o build Docker não é considerado um fluxo pronto sem ajustar essa divergência.
+```text
+M1  Keycloak + clients-as-code                 done
+M2  central credential verification           this service
+M3  user access/refresh tokens from Keycloak   next
+M4  telemetry validates Keycloak JWT           planned
+M5+ remaining Ouros services                    planned
+```
 
-## Contribuição
+## License
 
-Faça alterações em uma branch própria e use os templates de pull request disponíveis em `.github/PULL_REQUEST_TEMPLATE`.
-
-## Licença
-
-Este projeto está sob a licença MIT. Consulte o arquivo [LICENSE](LICENSE).
-
+MIT. See [LICENSE](LICENSE).
 
 ## Principais contribuidores
 
 <!-- CONTRIBUTORS:START -->
-- [@Nicolas25vlad](https://github.com/Nicolas25vlad) — 14 contribuições
-- [@Andre-Roger](https://github.com/Andre-Roger) — 1 contribuições
-- [@juwata](https://github.com/juwata) — 1 contribuições
+- [@Nicolas25vlad](https://github.com/Nicolas25vlad)
 <!-- CONTRIBUTORS:END -->
-
-> Atualizado automaticamente semanalmente pelo workflow de metadados do README.

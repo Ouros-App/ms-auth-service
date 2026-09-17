@@ -1,9 +1,11 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
-class MessageResponse(BaseModel):
-    message: str
-
-
 class HealthResponse(BaseModel):
-    status: str
+    status: Literal["ok"] = "ok"
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ready"] = "ready"

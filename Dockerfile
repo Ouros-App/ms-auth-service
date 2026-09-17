@@ -1,31 +1,24 @@
 FROM python:3.12-slim
 
-# Build arguments
-ARG APP_NAME
-ARG APP_PORT=8000
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=${APP_PORT} \
-    APP_NAME=${APP_NAME}
+    APP_PORT=8000 \
+    FORWARDED_ALLOW_IPS=127.0.0.1
 
 WORKDIR /app
 
-# Copiar requirements primeiro para melhor cache
-COPY requirements.txt .
+RUN addgroup --system ouros \
+    && adduser --system --ingroup ouros --home /app ouros
+
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar o restante da aplicação
-COPY app ./app
-COPY .env .
+COPY --chown=ouros:ouros app ./app
 
-# Verificar templates
-RUN test -f app/templates/workflows/fastapi.yml \
-    && test -f app/templates/workflows/frontend.yml \
-    && test -f app/templates/workflows/springboot.yml \
-    && test -f app/templates/workflows/generic.yml
+USER ouros
+EXPOSE 8000
 
-EXPOSE ${APP_PORT}
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:' + __import__('os').environ.get('APP_PORT', '8000') + '/health', timeout=2)"
 
-# CORREÇÃO: Usar sh -c para garantir expansão da variável
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-8000}"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-8000} --proxy-headers --forwarded-allow-ips ${FORWARDED_ALLOW_IPS:-127.0.0.1}"]
