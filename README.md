@@ -106,14 +106,45 @@ mobile/web -> ms-auth-service -> credential authority -> Keycloak -> access + re
 
 The exact Keycloak credential-federation mechanism is kept outside this PR so password authority is not silently duplicated into Keycloak.
 
-## Configuration
+## Configuration and Infisical
 
-Copy `.env.example` to `.env` for local development:
+Production runtime secrets are loaded from Infisical before Pydantic `Settings` is created. The integration follows the same Universal Auth pattern and environment variable names used by the other Ouros services.
+
+The platform only needs the Infisical bootstrap values:
+
+```dotenv
+INFISICAL_SITE_URL=https://app.infisical.com
+INFISICAL_CLIENT_ID=
+INFISICAL_CLIENT_SECRET=
+INFISICAL_PROJECT_ID=
+INFISICAL_ENVIRONMENT=prod
+INFISICAL_SECRET_PATH=/ms-auth-service
+```
+
+Application secrets belong in the Infisical path `/ms-auth-service`. For M2, the main secret is:
+
+```text
+DATABASE_URL
+```
+
+So the production flow is:
+
+```text
+Discloud env
+  -> Infisical Universal Auth credentials
+  -> /ms-auth-service
+  -> DATABASE_URL
+  -> Pydantic Settings
+  -> PostgreSQL
+```
+
+If no Infisical bootstrap values are configured, the loader is skipped. This keeps local development and CI compatible with a direct `DATABASE_URL` environment variable.
+
+Additional runtime configuration:
 
 ```dotenv
 APP_NAME=ouros-auth-service
 APP_PORT=8000
-DATABASE_URL=postgresql://user:password@localhost:5432/ouros
 DATABASE_MIN_POOL_SIZE=1
 DATABASE_MAX_POOL_SIZE=10
 DATABASE_COMMAND_TIMEOUT_SECONDS=5
@@ -138,7 +169,7 @@ Swagger UI is available at `/docs`.
 pytest
 ```
 
-The suite covers successful and rejected authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility and HTTP error behavior.
+The suite covers successful and rejected authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility, Infisical loading and HTTP error behavior.
 
 ## Structure
 
@@ -149,6 +180,7 @@ app/
 │   ├── config.py
 │   ├── database.py
 │   ├── errors.py
+│   ├── infisical.py
 │   └── security.py
 ├── models/identity.py
 ├── repositories/identity_repository.py
