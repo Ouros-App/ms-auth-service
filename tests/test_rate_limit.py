@@ -9,6 +9,7 @@ from app.core.rate_limit import RateLimiter
 
 
 def make_request(ip: str = "203.0.113.10") -> Request:
+    """Build a minimal request carrying a deterministic source address."""
     scope = {
         "type": "http",
         "method": "POST",
@@ -20,8 +21,10 @@ def make_request(ip: str = "203.0.113.10") -> Request:
 
 
 def test_burst_limit_blocks_fourth_attempt() -> None:
+    """Block the fourth attempt inside a three-request burst window."""
     settings = Settings(
         database_url="postgresql://unused",
+        redis_url=None,
         auth_rate_limit_ip_burst=3,
         auth_rate_limit_ip_burst_window_seconds=10,
         auth_rate_limit_ip_per_minute=100,
@@ -44,8 +47,10 @@ def test_burst_limit_blocks_fourth_attempt() -> None:
 
 
 def test_email_limit_is_shared_across_ips() -> None:
+    """Normalize email counters independently from the request source IP."""
     settings = Settings(
         database_url="postgresql://unused",
+        redis_url=None,
         auth_rate_limit_ip_burst=100,
         auth_rate_limit_ip_per_minute=100,
         auth_rate_limit_ip_per_15_minutes=100,
