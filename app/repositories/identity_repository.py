@@ -6,7 +6,7 @@ _FIND_IDENTITIES_SQL = """
 SELECT *
 FROM (
     SELECT
-        id::bigint AS legacy_id,
+        id::bigint AS database_id,
         email,
         password AS password_hash,
         'farm_owner'::text AS account_type,
@@ -20,7 +20,7 @@ FROM (
     UNION ALL
 
     SELECT
-        id::bigint AS legacy_id,
+        id::bigint AS database_id,
         email,
         password AS password_hash,
         'company_employee'::text AS account_type,
@@ -34,7 +34,7 @@ FROM (
     UNION ALL
 
     SELECT
-        id::bigint AS legacy_id,
+        id::bigint AS database_id,
         email,
         password AS password_hash,
         'admin'::text AS account_type,
@@ -46,7 +46,7 @@ FROM (
     WHERE lower(email) = $1
 ) AS identities
 WHERE $2::text IS NULL OR account_type = $2::text
-ORDER BY account_type, legacy_id
+ORDER BY account_type, database_id
 """
 
 
@@ -68,7 +68,7 @@ class IdentityRepository:
 
         return [
             StoredIdentity(
-                legacy_id=row["legacy_id"],
+                database_id=row["database_id"],
                 email=row["email"],
                 password_hash=row["password_hash"],
                 account_type=AccountType(row["account_type"]),
