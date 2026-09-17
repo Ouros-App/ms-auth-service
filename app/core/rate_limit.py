@@ -101,7 +101,7 @@ return {current, ttl}
             try:
                 async with asyncio.timeout(self._REDIS_OPERATION_TIMEOUT_SECONDS):
                     await client.ping()
-            except (RedisError, OSError, TimeoutError):
+            except (RedisError, OSError):
                 await client.aclose()
                 raise
             self._redis = client
@@ -119,14 +119,14 @@ return {current, ttl}
         if self._redis is None:
             try:
                 await self.connect()
-            except (RedisError, OSError, TimeoutError):
+            except (RedisError, OSError):
                 return False
         if self._redis is None:
             return False
         try:
             async with asyncio.timeout(self._REDIS_OPERATION_TIMEOUT_SECONDS):
                 return bool(await self._redis.ping())
-        except (RedisError, OSError, TimeoutError):
+        except (RedisError, OSError):
             return False
 
     async def check_credentials_attempt(
@@ -162,7 +162,7 @@ return {current, ttl}
         if self._redis_url is not None and self._redis is None:
             try:
                 await self.connect()
-            except (RedisError, OSError, TimeoutError):
+            except (RedisError, OSError):
                 pass
 
         if self._redis is not None:
@@ -177,7 +177,7 @@ return {current, ttl}
                 count = int(result[0])
                 ttl = max(int(result[1]), 1)
                 return count, ttl
-            except (RedisError, OSError, TimeoutError):
+            except (RedisError, OSError):
                 await self.close()
 
         now = monotonic()
