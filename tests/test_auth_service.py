@@ -28,14 +28,14 @@ def make_identity(
     password: str = "Senha123!",
     *,
     account_type: AccountType = AccountType.FARM_OWNER,
-    legacy_id: int = 10,
+    database_id: int = 10,
 ) -> StoredIdentity:
     password_hash = bcrypt.hashpw(
         password.encode(),
         bcrypt.gensalt(rounds=4),
     ).decode()
     return StoredIdentity(
-        legacy_id=legacy_id,
+        database_id=database_id,
         email="User@Example.COM",
         password_hash=password_hash,
         account_type=account_type,
@@ -66,7 +66,7 @@ def test_valid_credentials_return_identity_without_password() -> None:
     response = asyncio.run(service.verify_credentials(make_request()))
 
     assert response.authenticated is True
-    assert response.identity.legacy_subject == "farm_owner:10"
+    assert response.identity.id == 10
     assert response.identity.email == "User@Example.COM"
     assert response.identity.realm_role == "farm_owner"
     assert response.identity.farm_id == 9
@@ -106,10 +106,10 @@ def test_account_type_is_forwarded_to_repository() -> None:
 
 
 def test_multiple_matching_accounts_require_account_type() -> None:
-    first = make_identity(legacy_id=1)
+    first = make_identity(database_id=1)
     second = make_identity(
         account_type=AccountType.ADMIN,
-        legacy_id=2,
+        database_id=2,
     )
     service = AuthService(FakeRepository([first, second]))  # type: ignore[arg-type]
 
