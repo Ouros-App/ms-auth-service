@@ -66,5 +66,5 @@ class Database:
         try:
             async with self.connection() as connection:
                 return await connection.fetchval("SELECT 1") == 1
-        except (asyncpg.PostgresError, OSError, RuntimeError, TimeoutError):
+        except (asyncpg.PostgresError, OSError, RuntimeError):
             return False
