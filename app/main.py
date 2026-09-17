@@ -24,6 +24,7 @@ def create_app(
     auth_service: AuthService | None = None,
     rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
+    """Build the FastAPI application and wire its shared services."""
     if settings is None:
         load_infisical_secrets()
         get_settings.cache_clear()
@@ -37,11 +38,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Expose dependencies without making liveness depend on their startup."""
         application.state.database = resolved_database
         application.state.auth_service = resolved_auth_service
         application.state.rate_limiter = resolved_rate_limiter
-        await resolved_database.connect()
-        await resolved_rate_limiter.connect()
         try:
             yield
         finally:
@@ -63,6 +63,7 @@ def create_app(
         _request: Request,
         _exception: InvalidCredentialsError,
     ) -> JSONResponse:
+        """Return a generic authentication failure without account enumeration."""
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"detail": "Credenciais inválidas."},
@@ -73,6 +74,7 @@ def create_app(
         _request: Request,
         _exception: AmbiguousIdentityError,
     ) -> JSONResponse:
+        """Request account-type disambiguation when multiple identities match."""
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
@@ -88,6 +90,7 @@ def create_app(
         _request: Request,
         exception: RateLimitExceeded,
     ) -> JSONResponse:
+        """Return a standards-friendly retry hint for throttled login attempts."""
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Muitas tentativas. Tente novamente mais tarde."},
