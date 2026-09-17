@@ -64,20 +64,17 @@ def test_email_limit_is_shared_across_ips() -> None:
             auth_rate_limit_email_per_15_minutes=2,
         )
     )
+    first_request = make_request("203.0.113.10")
+    second_request = make_request("203.0.113.11")
+    blocked_request = make_request("203.0.113.12")
 
     async def scenario() -> None:
         """Exhaust one normalized email counter from multiple source addresses."""
-        await limiter.check_credentials_attempt(
-            make_request("203.0.113.10"), "User@Example.com"
-        )
-        await limiter.check_credentials_attempt(
-            make_request("203.0.113.11"), "user@example.com"
-        )
+        await limiter.check_credentials_attempt(first_request, "User@Example.com")
+        await limiter.check_credentials_attempt(second_request, "user@example.com")
 
         with pytest.raises(RateLimitExceeded):
-            await limiter.check_credentials_attempt(
-                make_request("203.0.113.12"), "USER@example.com"
-            )
+            await limiter.check_credentials_attempt(blocked_request, "USER@example.com")
 
     asyncio.run(scenario())
 
