@@ -11,7 +11,10 @@ from app.services.auth_service import AuthService
 
 
 class FakeRepository:
+    """Minimal identity repository double used by AuthService tests."""
+
     def __init__(self, identities: list[StoredIdentity]) -> None:
+        """Store deterministic identities and track repository calls."""
         self.identities = identities
         self.calls: list[tuple[str, AccountType | None]] = []
 
@@ -20,6 +23,7 @@ class FakeRepository:
         email: str,
         account_type: AccountType | None = None,
     ) -> list[StoredIdentity]:
+        """Return configured identities while recording normalized arguments."""
         self.calls.append((email, account_type))
         return self.identities
 
@@ -30,6 +34,7 @@ def make_identity(
     account_type: AccountType = AccountType.FARM_OWNER,
     database_id: int = 10,
 ) -> StoredIdentity:
+    """Build one stored identity with a cheap bcrypt hash for tests."""
     password_hash = bcrypt.hashpw(
         password.encode(),
         bcrypt.gensalt(rounds=4),
@@ -52,6 +57,7 @@ def make_request(
     password: str = "Senha123!",
     account_type: AccountType | None = None,
 ) -> CredentialVerificationRequest:
+    """Build a normalized credential-verification request for tests."""
     return CredentialVerificationRequest(
         email=" USER@example.com ",
         password=SecretStr(password),
@@ -60,6 +66,7 @@ def make_request(
 
 
 def test_valid_credentials_return_identity_without_password() -> None:
+    """Return business identity data without exposing the stored password hash."""
     repository = FakeRepository([make_identity()])
     service = AuthService(repository)  # type: ignore[arg-type]
 
@@ -75,20 +82,25 @@ def test_valid_credentials_return_identity_without_password() -> None:
 
 
 def test_wrong_password_is_rejected() -> None:
+    """Reject a known identity when the supplied password does not match."""
     service = AuthService(FakeRepository([make_identity()]))  # type: ignore[arg-type]
+    request = make_request("wrong-password")
 
     with pytest.raises(InvalidCredentialsError):
-        asyncio.run(service.verify_credentials(make_request("wrong-password")))
+        asyncio.run(service.verify_credentials(request))
 
 
 def test_unknown_user_is_rejected() -> None:
+    """Reject a request when no identity exists for the supplied email."""
     service = AuthService(FakeRepository([]))  # type: ignore[arg-type]
+    request = make_request()
 
     with pytest.raises(InvalidCredentialsError):
-        asyncio.run(service.verify_credentials(make_request()))
+        asyncio.run(service.verify_credentials(request))
 
 
 def test_account_type_is_forwarded_to_repository() -> None:
+    """Forward an optional account-type hint to identity lookup."""
     repository = FakeRepository(
         [make_identity(account_type=AccountType.COMPANY_EMPLOYEE)]
     )
@@ -106,12 +118,14 @@ def test_account_type_is_forwarded_to_repository() -> None:
 
 
 def test_multiple_matching_accounts_require_account_type() -> None:
+    """Require disambiguation when one credential matches multiple identities."""
     first = make_identity(database_id=1)
     second = make_identity(
         account_type=AccountType.ADMIN,
         database_id=2,
     )
     service = AuthService(FakeRepository([first, second]))  # type: ignore[arg-type]
+    request = make_request()
 
     with pytest.raises(AmbiguousIdentityError):
-        asyncio.run(service.verify_credentials(make_request()))
+        asyncio.run(service.verify_credentials(request))
