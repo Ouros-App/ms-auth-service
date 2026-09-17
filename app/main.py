@@ -7,8 +7,13 @@ from fastapi.responses import JSONResponse
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.database import Database
-from app.core.errors import AmbiguousIdentityError, InvalidCredentialsError
+from app.core.errors import (
+    AmbiguousIdentityError,
+    InvalidCredentialsError,
+    RateLimitExceeded,
+)
 from app.core.infisical import load_infisical_secrets
+from app.core.rate_limit import RateLimiter
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
 
@@ -17,6 +22,7 @@ def create_app(
     settings: Settings | None = None,
     database: Database | None = None,
     auth_service: AuthService | None = None,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     if settings is None:
         load_infisical_secrets()
@@ -27,15 +33,19 @@ def create_app(
     resolved_auth_service = auth_service or AuthService(
         IdentityRepository(resolved_database)
     )
+    resolved_rate_limiter = rate_limiter or RateLimiter(resolved_settings)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.database = resolved_database
         application.state.auth_service = resolved_auth_service
+        application.state.rate_limiter = resolved_rate_limiter
         await resolved_database.connect()
+        await resolved_rate_limiter.connect()
         try:
             yield
         finally:
+            await resolved_rate_limiter.close()
             await resolved_database.close()
 
     application = FastAPI(
@@ -71,6 +81,17 @@ def create_app(
                     "Informe account_type."
                 )
             },
+        )
+
+    @application.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(
+        _request: Request,
+        exception: RateLimitExceeded,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"detail": "Muitas tentativas. Tente novamente mais tarde."},
+            headers={"Retry-After": str(exception.retry_after)},
         )
 
     application.include_router(router)
