@@ -19,7 +19,7 @@ This service currently owns **credential verification against the production Pos
 
 That boundary is intentional: the old Spring API signs its own JWT after validating bcrypt passwords, while the target architecture uses Keycloak as the token issuer. M2 moves password validation out of application APIs without introducing a second homemade token format.
 
-### Supported legacy identities
+### Supported identities
 
 | Account type | Source table | Keycloak realm role |
 | --- | --- | --- |
@@ -57,12 +57,11 @@ Content-Type: application/json
 ```json
 {
   "email": "user@example.com",
-  "password": "plain-text-from-the-login-form",
-  "account_type": "farm_owner"
+  "password": "plain-text-from-the-login-form"
 }
 ```
 
-`account_type` is optional. When omitted, the service checks all supported identity tables. If the same credentials match more than one legacy identity, the request returns `409` and the client must provide `account_type`.
+`account_type` is optional. By default, the service detects the account type automatically by checking the supported identity tables and validating the supplied password against the matching candidates. If the same credentials match more than one identity, the request returns `409` and the client may retry with `account_type` to disambiguate.
 
 Success:
 
@@ -70,8 +69,7 @@ Success:
 {
   "authenticated": true,
   "identity": {
-    "legacy_subject": "farm_owner:42",
-    "legacy_id": 42,
+    "id": 42,
     "email": "user@example.com",
     "account_type": "farm_owner",
     "realm_role": "farm_owner",
@@ -82,6 +80,8 @@ Success:
   }
 }
 ```
+
+`identity.id` is the real `id` from the production database table and remains the business/database identifier used by the existing Ouros services. A future Keycloak subject identifier is a separate authentication identifier and must not replace or be confused with this database `id`.
 
 Invalid email/password always returns the same generic `401` response.
 
