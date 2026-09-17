@@ -31,8 +31,7 @@ class CredentialVerificationRequest(BaseModel):
 
 
 class IdentityResponse(BaseModel):
-    legacy_subject: str
-    legacy_id: int
+    id: int
     email: str
     account_type: AccountType
     realm_role: str
@@ -44,8 +43,7 @@ class IdentityResponse(BaseModel):
     @classmethod
     def from_identity(cls, identity: StoredIdentity) -> "IdentityResponse":
         return cls(
-            legacy_subject=identity.legacy_subject,
-            legacy_id=identity.legacy_id,
+            id=identity.database_id,
             email=identity.email,
             account_type=identity.account_type,
             realm_role=identity.account_type.realm_role,
