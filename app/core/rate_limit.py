@@ -5,6 +5,7 @@ from time import monotonic
 
 from fastapi import Request
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.core.config import Settings
 from app.core.errors import RateLimitExceeded
@@ -12,6 +13,8 @@ from app.core.errors import RateLimitExceeded
 
 @dataclass(frozen=True, slots=True)
 class RateLimitRule:
+    """One counter dimension and time window used by the auth limiter."""
+
     name: str
     limit: int
     window_seconds: int
@@ -19,11 +22,12 @@ class RateLimitRule:
 
 
 class RateLimiter:
-    """Rate limits credential verification by source IP and normalized email.
+    """Rate limit credential verification by source IP and normalized email.
 
     Redis is used when REDIS_URL is configured so counters are shared across
-    replicas. Without Redis the service falls back to an in-process limiter,
-    which keeps local development and single-instance deployments protected.
+    replicas. Without Redis, or during a temporary Redis outage, the service
+    falls back to an in-process limiter so credential verification is still
+    protected on each running instance.
     """
 
     _REDIS_SCRIPT = """
@@ -38,8 +42,9 @@ return {current, ttl}
     def __init__(self, settings: Settings) -> None:
         self._redis_url = settings.redis_url
         self._redis: Redis | None = None
+        self._redis_lock = asyncio.Lock()
         self._memory: dict[str, tuple[int, float]] = {}
-        self._lock = asyncio.Lock()
+        self._memory_lock = asyncio.Lock()
         self._rules = (
             RateLimitRule(
                 name="ip-burst",
@@ -69,27 +74,45 @@ return {current, ttl}
 
     @property
     def distributed(self) -> bool:
+        """Return whether this limiter is configured for shared Redis counters."""
         return self._redis_url is not None
 
     async def connect(self) -> None:
-        if self._redis_url is None:
+        """Connect to Redis when configured, allowing later retries after failure."""
+        if self._redis_url is None or self._redis is not None:
             return
-        self._redis = Redis.from_url(self._redis_url, decode_responses=True)
-        await self._redis.ping()
+
+        async with self._redis_lock:
+            if self._redis is not None:
+                return
+            client = Redis.from_url(self._redis_url, decode_responses=True)
+            try:
+                await client.ping()
+            except (RedisError, OSError, TimeoutError):
+                await client.aclose()
+                raise
+            self._redis = client
 
     async def close(self) -> None:
+        """Close the Redis client when one is active."""
         if self._redis is not None:
             await self._redis.aclose()
             self._redis = None
 
     async def ping(self) -> bool:
+        """Return whether the configured distributed limiter is reachable."""
         if self._redis_url is None:
             return True
+        if self._redis is None:
+            try:
+                await self.connect()
+            except (RedisError, OSError, TimeoutError):
+                return False
         if self._redis is None:
             return False
         try:
             return bool(await self._redis.ping())
-        except Exception:
+        except (RedisError, OSError, TimeoutError):
             return False
 
     async def check_credentials_attempt(
@@ -97,6 +120,7 @@ return {current, ttl}
         request: Request,
         email: str,
     ) -> None:
+        """Consume all configured counters and raise when any limit is exceeded."""
         ip = self._client_ip(request)
         dimensions = {
             "ip": self._digest(ip),
@@ -120,19 +144,29 @@ return {current, ttl}
             raise RateLimitExceeded(retry_after=longest_retry_after)
 
     async def _increment(self, key: str, window_seconds: int) -> tuple[int, int]:
+        """Increment a Redis counter, falling back to memory if Redis is unavailable."""
+        if self._redis_url is not None and self._redis is None:
+            try:
+                await self.connect()
+            except (RedisError, OSError, TimeoutError):
+                pass
+
         if self._redis is not None:
-            result = await self._redis.eval(
-                self._REDIS_SCRIPT,
-                1,
-                key,
-                window_seconds,
-            )
-            count = int(result[0])
-            ttl = max(int(result[1]), 1)
-            return count, ttl
+            try:
+                result = await self._redis.eval(
+                    self._REDIS_SCRIPT,
+                    1,
+                    key,
+                    window_seconds,
+                )
+                count = int(result[0])
+                ttl = max(int(result[1]), 1)
+                return count, ttl
+            except (RedisError, OSError, TimeoutError):
+                await self.close()
 
         now = monotonic()
-        async with self._lock:
+        async with self._memory_lock:
             current = self._memory.get(key)
             if current is None or current[1] <= now:
                 count = 1
@@ -147,10 +181,12 @@ return {current, ttl}
 
     @staticmethod
     def _digest(value: str) -> str:
+        """Hash rate-limit dimensions so raw emails and IPs are not stored as keys."""
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _client_ip(request: Request) -> str:
+        """Resolve the originating address from the deployment proxy headers."""
         cloudflare_ip = request.headers.get("cf-connecting-ip")
         if cloudflare_ip:
             return cloudflare_ip.strip()
