@@ -108,19 +108,20 @@ The exact Keycloak credential-federation mechanism is kept outside this PR so pa
 
 ## Configuration and Infisical
 
-Production runtime secrets are loaded from Infisical before Pydantic `Settings` is created. This service now follows the same Python pattern used by `ms-ai-server` and `ms-mcp-server-ouros-knowledge`: the platform provides the Infisical bootstrap variables, the SDK loads the path contents, and those secrets are injected into the process environment before the app settings are parsed.
-
-The runtime bootstrap values are:
+Production runtime secrets are loaded from Infisical before Pydantic `Settings` is created. The bootstrap connection follows the Ouros Universal Auth convention used in deployment:
 
 ```dotenv
-INFISICAL_HOST=https://app.infisical.com
-INFISICAL_TOKEN=
+INFISICAL_SITE_URL=https://app.infisical.com
+INFISICAL_CLIENT_ID=
+INFISICAL_CLIENT_SECRET=
 INFISICAL_PROJECT_ID=
-INFISICAL_ENV=prod
-INFISICAL_PATH=/ms-auth-service
+INFISICAL_ENVIRONMENT=prod
+INFISICAL_SECRET_PATH=/ms-auth-service
 ```
 
-Application secrets belong in the configured Infisical path. For M2, the database connection should be stored there as:
+The service authenticates with `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET`, loads all secrets from `INFISICAL_SECRET_PATH`, and injects them into the process environment before application settings are parsed.
+
+For M2, the application secret that should exist inside `/ms-auth-service` is:
 
 ```text
 DATABASE_URL
@@ -130,7 +131,7 @@ So the production flow is:
 
 ```text
 Discloud env
-  -> INFISICAL_TOKEN + project/env/path
+  -> Infisical Universal Auth bootstrap
   -> Infisical /ms-auth-service
   -> DATABASE_URL
   -> Pydantic Settings
