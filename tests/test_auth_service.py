@@ -17,6 +17,7 @@ class FakeRepository:
         """Store deterministic identities and track repository calls."""
         self.identities = identities
         self.calls: list[tuple[str, AccountType | None]] = []
+        self.external_calls: list[tuple[AccountType, int]] = []
 
     async def find_by_email(
         self,
@@ -26,6 +27,21 @@ class FakeRepository:
         """Return configured identities while recording normalized arguments."""
         self.calls.append((email, account_type))
         return self.identities
+
+    async def find_by_external_id(
+        self,
+        account_type: AccountType,
+        database_id: int,
+    ) -> StoredIdentity | None:
+        """Return the matching configured identity by stable business key."""
+        self.external_calls.append((account_type, database_id))
+        for identity in self.identities:
+            if (
+                identity.account_type is account_type
+                and identity.database_id == database_id
+            ):
+                return identity
+        return None
 
 
 def make_identity(
@@ -129,3 +145,61 @@ def test_multiple_matching_accounts_require_account_type() -> None:
 
     with pytest.raises(AmbiguousIdentityError):
         asyncio.run(service.verify_credentials(request))
+
+
+def test_lookup_identity_by_email_returns_normalized_identity() -> None:
+    """Expose identity metadata without credential material to Keycloak."""
+    repository = FakeRepository([make_identity(database_id=31)])
+    service = AuthService(repository)  # type: ignore[arg-type]
+
+    identity = asyncio.run(service.lookup_identity_by_email("user@example.com"))
+
+    assert identity is not None
+    assert identity.id == 31
+    assert identity.realm_role == "farm_owner"
+
+
+def test_lookup_identity_by_email_returns_none_when_missing() -> None:
+    """Return no external identity when the email is unknown."""
+    service = AuthService(FakeRepository([]))  # type: ignore[arg-type]
+
+    identity = asyncio.run(service.lookup_identity_by_email("missing@example.com"))
+
+    assert identity is None
+
+
+def test_lookup_identity_by_email_rejects_ambiguous_accounts() -> None:
+    """Refuse to federate one email that maps to multiple account records."""
+    repository = FakeRepository([
+        make_identity(database_id=1),
+        make_identity(account_type=AccountType.ADMIN, database_id=2),
+    ])
+    service = AuthService(repository)  # type: ignore[arg-type]
+
+    with pytest.raises(AmbiguousIdentityError):
+        asyncio.run(service.lookup_identity_by_email("user@example.com"))
+
+
+def test_lookup_identity_by_external_id_returns_identity() -> None:
+    """Resolve the stable external key used in Keycloak federated user ids."""
+    repository = FakeRepository([make_identity(database_id=44)])
+    service = AuthService(repository)  # type: ignore[arg-type]
+
+    identity = asyncio.run(
+        service.lookup_identity_by_external_id(AccountType.FARM_OWNER, 44)
+    )
+
+    assert identity is not None
+    assert identity.id == 44
+    assert repository.external_calls == [(AccountType.FARM_OWNER, 44)]
+
+
+def test_lookup_identity_by_external_id_returns_none_when_missing() -> None:
+    """Return no identity when a federated business key no longer exists."""
+    service = AuthService(FakeRepository([]))  # type: ignore[arg-type]
+
+    identity = asyncio.run(
+        service.lookup_identity_by_external_id(AccountType.ADMIN, 999)
+    )
+
+    assert identity is None

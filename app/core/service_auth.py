@@ -15,15 +15,17 @@ class ServiceAuthenticationError(RuntimeError):
 class KeycloakServiceTokenVerifier:
     """Validate Keycloak service-account tokens for internal auth endpoints."""
 
+    _JWKS_REFRESH_COOLDOWN_SECONDS = 5
+
     def __init__(self, settings: Settings) -> None:
         self._issuer = settings.keycloak_issuer_url.rstrip("/")
         self._audience = settings.keycloak_internal_audience
         self._client_id = settings.keycloak_internal_client_id
         self._jwk_client = PyJWKClient(
             f"{self._issuer}/protocol/openid-connect/certs",
-            cache_keys=True,
             lifespan=300,
             timeout=3,
+            cooldown_duration=self._JWKS_REFRESH_COOLDOWN_SECONDS,
         )
 
     async def verify_authorization_header(
