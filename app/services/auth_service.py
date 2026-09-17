@@ -1,3 +1,5 @@
+import asyncio
+
 from app.core.errors import AmbiguousIdentityError, InvalidCredentialsError
 from app.core.security import burn_dummy_password_check, verify_password
 from app.repositories.identity_repository import IdentityRepository
@@ -9,6 +11,8 @@ from app.schemas.auth import (
 
 
 class AuthService:
+    """Verify existing Ouros credentials without minting application tokens."""
+
     def __init__(self, repository: IdentityRepository) -> None:
         self._repository = repository
 
@@ -16,6 +20,7 @@ class AuthService:
         self,
         request: CredentialVerificationRequest,
     ) -> CredentialVerificationResponse:
+        """Validate credentials and return exactly one normalized identity."""
         identities = await self._repository.find_by_email(
             request.email,
             request.account_type,
@@ -23,14 +28,18 @@ class AuthService:
         raw_password = request.password.get_secret_value()
 
         if not identities:
-            burn_dummy_password_check(raw_password)
+            await asyncio.to_thread(burn_dummy_password_check, raw_password)
             raise InvalidCredentialsError
 
-        matches = [
-            identity
-            for identity in identities
-            if verify_password(raw_password, identity.password_hash)
-        ]
+        matches = []
+        for identity in identities:
+            is_match = await asyncio.to_thread(
+                verify_password,
+                raw_password,
+                identity.password_hash,
+            )
+            if is_match:
+                matches.append(identity)
 
         if not matches:
             raise InvalidCredentialsError
