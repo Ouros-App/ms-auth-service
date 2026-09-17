@@ -25,8 +25,7 @@ class FakeAuthService:
     async def verify_credentials(self, _request):
         return CredentialVerificationResponse(
             identity=IdentityResponse(
-                legacy_subject="farm_owner:1",
-                legacy_id=1,
+                id=1,
                 email="user@example.com",
                 account_type=AccountType.FARM_OWNER,
                 realm_role="farm_owner",
@@ -72,7 +71,7 @@ def test_verify_credentials_route() -> None:
             json={"email": "user@example.com", "password": "Senha123!"},
         )
     assert response.status_code == 200
-    assert response.json()["identity"]["legacy_subject"] == "farm_owner:1"
+    assert response.json()["identity"]["id"] == 1
 
 
 def test_verify_credentials_returns_generic_401() -> None:
