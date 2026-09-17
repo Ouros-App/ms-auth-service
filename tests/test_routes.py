@@ -15,11 +15,11 @@ class FakeDatabase:
 
     async def connect(self) -> None:
         """Mirror the database interface without opening a connection."""
-        return None
+        return
 
     async def close(self) -> None:
         """Mirror the database interface without cleanup."""
-        return None
+        return
 
     async def ping(self) -> bool:
         """Return the configured readiness state."""
