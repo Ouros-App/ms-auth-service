@@ -19,22 +19,21 @@ def test_infisical_is_optional_when_bootstrap_is_absent() -> None:
 def test_partial_infisical_configuration_fails_fast() -> None:
     with patch.dict(
         os.environ,
-        {"INFISICAL_CLIENT_ID": "client-id"},
+        {"INFISICAL_TOKEN": "token"},
         clear=True,
     ), patch("app.core.infisical.load_dotenv"), pytest.raises(
         RuntimeError,
-        match="Configuração parcial do Infisical",
+        match="INFISICAL_TOKEN, INFISICAL_PROJECT_ID, INFISICAL_ENV e INFISICAL_PATH",
     ):
         load_infisical_secrets()
 
 
 def test_infisical_loads_runtime_secrets_into_environment() -> None:
     bootstrap = {
-        "INFISICAL_CLIENT_ID": "client-id",
-        "INFISICAL_CLIENT_SECRET": "client-secret",
+        "INFISICAL_TOKEN": "token",
         "INFISICAL_PROJECT_ID": "project-id",
-        "INFISICAL_ENVIRONMENT": "prod",
-        "INFISICAL_SECRET_PATH": "/ms-auth-service",
+        "INFISICAL_ENV": "prod",
+        "INFISICAL_PATH": "/ms-auth-service",
     }
     sdk = MagicMock()
     sdk.secrets.list_secrets.return_value = SimpleNamespace(
@@ -55,10 +54,9 @@ def test_infisical_loads_runtime_secrets_into_environment() -> None:
         load_infisical_secrets()
         assert os.environ["DATABASE_URL"] == "postgresql://runtime-secret"
 
-    client.assert_called_once_with(host="https://app.infisical.com")
-    sdk.auth.universal_auth.login.assert_called_once_with(
-        client_id="client-id",
-        client_secret="client-secret",
+    client.assert_called_once_with(
+        host="https://app.infisical.com",
+        token="token",
     )
     sdk.secrets.list_secrets.assert_called_once_with(
         project_id="project-id",
