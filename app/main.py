@@ -8,6 +8,7 @@ from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.database import Database
 from app.core.errors import AmbiguousIdentityError, InvalidCredentialsError
+from app.core.infisical import load_infisical_secrets
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
 
@@ -17,6 +18,10 @@ def create_app(
     database: Database | None = None,
     auth_service: AuthService | None = None,
 ) -> FastAPI:
+    if settings is None:
+        load_infisical_secrets()
+        get_settings.cache_clear()
+
     resolved_settings = settings or get_settings()
     resolved_database = database or Database(resolved_settings)
     resolved_auth_service = auth_service or AuthService(
