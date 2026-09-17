@@ -108,20 +108,19 @@ The exact Keycloak credential-federation mechanism is kept outside this PR so pa
 
 ## Configuration and Infisical
 
-Production runtime secrets are loaded from Infisical before Pydantic `Settings` is created. The integration follows the same Universal Auth pattern and environment variable names used by the other Ouros services.
+Production runtime secrets are loaded from Infisical before Pydantic `Settings` is created. This service now follows the same Python pattern used by `ms-ai-server` and `ms-mcp-server-ouros-knowledge`: the platform provides the Infisical bootstrap variables, the SDK loads the path contents, and those secrets are injected into the process environment before the app settings are parsed.
 
-The platform only needs the Infisical bootstrap values:
+The runtime bootstrap values are:
 
 ```dotenv
-INFISICAL_SITE_URL=https://app.infisical.com
-INFISICAL_CLIENT_ID=
-INFISICAL_CLIENT_SECRET=
+INFISICAL_HOST=https://app.infisical.com
+INFISICAL_TOKEN=
 INFISICAL_PROJECT_ID=
-INFISICAL_ENVIRONMENT=prod
-INFISICAL_SECRET_PATH=/ms-auth-service
+INFISICAL_ENV=prod
+INFISICAL_PATH=/ms-auth-service
 ```
 
-Application secrets belong in the Infisical path `/ms-auth-service`. For M2, the main secret is:
+Application secrets belong in the configured Infisical path. For M2, the database connection should be stored there as:
 
 ```text
 DATABASE_URL
@@ -131,14 +130,14 @@ So the production flow is:
 
 ```text
 Discloud env
-  -> Infisical Universal Auth credentials
-  -> /ms-auth-service
+  -> INFISICAL_TOKEN + project/env/path
+  -> Infisical /ms-auth-service
   -> DATABASE_URL
   -> Pydantic Settings
   -> PostgreSQL
 ```
 
-If no Infisical bootstrap values are configured, the loader is skipped. This keeps local development and CI compatible with a direct `DATABASE_URL` environment variable.
+If no Infisical bootstrap values are configured, the loader is skipped. This keeps local development and CI compatible with a direct `DATABASE_URL` environment variable. A partial Infisical configuration fails fast instead of silently starting with missing secrets.
 
 Additional runtime configuration:
 
