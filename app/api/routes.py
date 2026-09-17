@@ -44,13 +44,13 @@ async def root() -> dict[str, str]:
     }
 
 
-@router.get("/health", response_model=HealthResponse, tags=["health"])
+@router.get("/health", tags=["health"])
 async def health() -> HealthResponse:
     """Return process liveness independently from external dependencies."""
     return HealthResponse()
 
 
-@router.get("/ready", response_model=ReadinessResponse, tags=["health"])
+@router.get("/ready", tags=["health"])
 async def ready(
     database: DatabaseDependency,
     rate_limiter: RateLimiterDependency,
@@ -71,7 +71,6 @@ async def ready(
 
 @router.post(
     "/v1/auth/credentials/verify",
-    response_model=CredentialVerificationResponse,
     tags=["auth"],
     summary="Verify Ouros credentials",
 )
