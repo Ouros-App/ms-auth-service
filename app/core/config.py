@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     database_max_pool_size: int = Field(default=10, ge=1)
     database_command_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    redis_url: str | None = None
+    auth_rate_limit_ip_burst: int = Field(default=3, ge=1)
+    auth_rate_limit_ip_burst_window_seconds: int = Field(default=10, ge=1)
+    auth_rate_limit_ip_per_minute: int = Field(default=5, ge=1)
+    auth_rate_limit_ip_per_15_minutes: int = Field(default=20, ge=1)
+    auth_rate_limit_email_per_15_minutes: int = Field(default=5, ge=1)
+
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":
         if self.database_max_pool_size < self.database_min_pool_size:
