@@ -175,6 +175,7 @@ jobs:
             echo "sonar.projectKey=${SONAR_PROJECT_KEY:-${owner}_${repo}}"
             echo "sonar.sources=app"
             echo "sonar.tests=tests"
+            echo "sonar.python.version=3.12"
             echo "sonar.python.coverage.reportPaths=coverage.xml"
             if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
               echo "sonar.branch.name=main"
@@ -195,8 +196,27 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+
+      - name: Report SonarCloud PR issues
+        if: always() && github.event_name == 'pull_request'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          project_key="$(grep '^sonar.projectKey=' sonar-project.properties | cut -d= -f2-)"
+          curl -fsS -u "${SONAR_TOKEN}:" --get "https://sonarcloud.io/api/issues/search" \
+            --data-urlencode "organization=${GITHUB_REPOSITORY_OWNER,,}" \
+            --data-urlencode "componentKeys=${project_key}" \
+            --data-urlencode "pullRequest=${PR_NUMBER}" \
+            --data-urlencode "issueStatuses=OPEN,CONFIRMED" \
+            --data-urlencode "ps=100" \
+          | jq -r '.issues[] | [(.type // "-"), (.severity // "-"), .rule, .component, ((.line // 0) | tostring), .message] | @tsv'
 
       - name: Publish SonarCloud project
+        if: success()
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
