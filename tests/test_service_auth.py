@@ -23,15 +23,17 @@ def make_verifier() -> KeycloakServiceTokenVerifier:
 def test_missing_bearer_token_is_rejected() -> None:
     """Require an Authorization header on internal endpoints."""
     verifier = make_verifier()
+    verification = verifier.verify_authorization_header(None)
     with pytest.raises(ServiceAuthenticationError):
-        asyncio.run(verifier.verify_authorization_header(None))
+        asyncio.run(verification)
 
 
 def test_malformed_bearer_token_is_rejected() -> None:
     """Reject non-Bearer authorization schemes before JWKS lookup."""
     verifier = make_verifier()
+    verification = verifier.verify_authorization_header("Basic abc")
     with pytest.raises(ServiceAuthenticationError):
-        asyncio.run(verifier.verify_authorization_header("Basic abc"))
+        asyncio.run(verification)
 
 
 def test_valid_bearer_shape_delegates_to_decoder() -> None:
