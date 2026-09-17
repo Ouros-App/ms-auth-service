@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from app.api.internal_routes import router as internal_router
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.database import Database
@@ -14,6 +15,7 @@ from app.core.errors import (
 )
 from app.core.infisical import load_infisical_secrets
 from app.core.rate_limit import RateLimiter
+from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
 
@@ -23,6 +25,7 @@ def create_app(
     database: Database | None = None,
     auth_service: AuthService | None = None,
     rate_limiter: RateLimiter | None = None,
+    service_token_verifier: KeycloakServiceTokenVerifier | None = None,
 ) -> FastAPI:
     """Build the FastAPI application and wire its shared services."""
     if settings is None:
@@ -35,6 +38,10 @@ def create_app(
         IdentityRepository(resolved_database)
     )
     resolved_rate_limiter = rate_limiter or RateLimiter(resolved_settings)
+    resolved_service_token_verifier = (
+        service_token_verifier
+        or KeycloakServiceTokenVerifier(resolved_settings)
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -42,6 +49,7 @@ def create_app(
         application.state.database = resolved_database
         application.state.auth_service = resolved_auth_service
         application.state.rate_limiter = resolved_rate_limiter
+        application.state.service_token_verifier = resolved_service_token_verifier
         try:
             yield
         finally:
@@ -53,7 +61,7 @@ def create_app(
         version=resolved_settings.app_version,
         description=(
             "Central credential verification service for Ouros. "
-            "Keycloak token issuance is intentionally outside M2."
+            "M3 adds an authenticated bridge for Keycloak User Storage."
         ),
         lifespan=lifespan,
     )
@@ -98,6 +106,7 @@ def create_app(
         )
 
     application.include_router(router)
+    application.include_router(internal_router)
     return application
 
 

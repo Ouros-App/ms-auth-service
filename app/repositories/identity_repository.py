@@ -48,6 +48,62 @@ WHERE $2::text IS NULL OR account_type = $2::text
 ORDER BY account_type, database_id
 """
 
+_FIND_BY_ID_SQL = {
+    AccountType.FARM_OWNER: """
+        SELECT
+            id::bigint AS database_id,
+            email,
+            password AS password_hash,
+            'farm_owner'::text AS account_type,
+            name,
+            id_farm::bigint AS farm_id,
+            NULL::bigint AS enterprise_id,
+            first_access
+        FROM public.farm_owners
+        WHERE id = $1
+    """,
+    AccountType.COMPANY_EMPLOYEE: """
+        SELECT
+            id::bigint AS database_id,
+            email,
+            password AS password_hash,
+            'company_employee'::text AS account_type,
+            name,
+            NULL::bigint AS farm_id,
+            id_enterprise::bigint AS enterprise_id,
+            NULL::boolean AS first_access
+        FROM public.company_employees
+        WHERE id = $1
+    """,
+    AccountType.ADMIN: """
+        SELECT
+            id::bigint AS database_id,
+            email,
+            password AS password_hash,
+            'admin'::text AS account_type,
+            NULL::text AS name,
+            NULL::bigint AS farm_id,
+            NULL::bigint AS enterprise_id,
+            NULL::boolean AS first_access
+        FROM public.adms
+        WHERE id = $1
+    """,
+}
+
+
+def _row_to_identity(row) -> StoredIdentity:
+    """Map one normalized database row into the domain identity model."""
+    return StoredIdentity(
+        database_id=row["database_id"],
+        email=row["email"],
+        password_hash=row["password_hash"],
+        account_type=AccountType(row["account_type"]),
+        name=row["name"],
+        farm_id=row["farm_id"],
+        enterprise_id=row["enterprise_id"],
+        first_access=row["first_access"],
+    )
+
 
 class IdentityRepository:
     """Read identities from the existing Ouros production tables."""
@@ -68,16 +124,19 @@ class IdentityRepository:
                 account_type.value if account_type else None,
             )
 
-        return [
-            StoredIdentity(
-                database_id=row["database_id"],
-                email=row["email"],
-                password_hash=row["password_hash"],
-                account_type=AccountType(row["account_type"]),
-                name=row["name"],
-                farm_id=row["farm_id"],
-                enterprise_id=row["enterprise_id"],
-                first_access=row["first_access"],
+        return [_row_to_identity(row) for row in rows]
+
+    async def find_by_external_id(
+        self,
+        account_type: AccountType,
+        database_id: int,
+    ) -> StoredIdentity | None:
+        """Return one identity by stable business id and account type."""
+        async with self._database.connection() as connection:
+            row = await connection.fetchrow(
+                _FIND_BY_ID_SQL[account_type],
+                database_id,
             )
-            for row in rows
-        ]
+        if row is None:
+            return None
+        return _row_to_identity(row)
