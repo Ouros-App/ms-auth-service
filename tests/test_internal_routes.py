@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.core.errors import InvalidCredentialsError
 from app.main import create_app
 from app.models.identity import AccountType
 from app.schemas.auth import CredentialVerificationResponse, IdentityResponse
@@ -62,8 +63,10 @@ class FakeAuthService:
         """Return the synthetic identity by stable id."""
         return self.identity()
 
-    async def verify_credentials(self, _payload):
-        """Return a successful credential verification."""
+    async def verify_credentials(self, payload):
+        """Return success unless the test explicitly supplies a bad password."""
+        if payload.password.get_secret_value() == "wrong-password":
+            raise InvalidCredentialsError
         return CredentialVerificationResponse(identity=self.identity())
 
 
@@ -133,3 +136,20 @@ def test_internal_credential_verification() -> None:
         )
     assert response.status_code == 200
     assert response.json()["authenticated"] is True
+
+
+def test_invalid_password_uses_forbidden_not_service_unauthorized() -> None:
+    """Keep invalid human credentials distinct from an invalid service token."""
+    client, _verifier = build_client()
+    with client:
+        response = client.post(
+            "/internal/v1/credentials/verify",
+            headers={"Authorization": "Bearer internal-token"},
+            json={
+                "email": "user@example.com",
+                "password": "wrong-password",
+                "account_type": "farm_owner",
+            },
+        )
+    assert response.status_code == 403
+    assert "www-authenticate" not in response.headers

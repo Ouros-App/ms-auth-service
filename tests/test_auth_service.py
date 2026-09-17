@@ -175,9 +175,10 @@ def test_lookup_identity_by_email_rejects_ambiguous_accounts() -> None:
         make_identity(account_type=AccountType.ADMIN, database_id=2),
     ])
     service = AuthService(repository)  # type: ignore[arg-type]
+    lookup = service.lookup_identity_by_email("user@example.com")
 
     with pytest.raises(AmbiguousIdentityError):
-        asyncio.run(service.lookup_identity_by_email("user@example.com"))
+        asyncio.run(lookup)
 
 
 def test_lookup_identity_by_external_id_returns_identity() -> None:

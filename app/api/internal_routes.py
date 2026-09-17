@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
+from app.core.errors import InvalidCredentialsError
 from app.core.service_auth import (
     KeycloakServiceTokenVerifier,
     ServiceAuthenticationError,
@@ -100,5 +101,11 @@ async def verify_internal_credentials(
     service: AuthServiceDependency,
     _auth: ServiceAuthDependency,
 ) -> CredentialVerificationResponse:
-    """Verify a password for Keycloak without applying public-IP rate limits."""
-    return await service.verify_credentials(payload)
+    """Verify a password while reserving 401 for service-token failures."""
+    try:
+        return await service.verify_credentials(payload)
+    except InvalidCredentialsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Credenciais inválidas.",
+        ) from exc
