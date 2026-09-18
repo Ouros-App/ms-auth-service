@@ -2,7 +2,6 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
-from app.services.keycloak_token_broker import KeycloakTokenBrokerUnavailable
 from app.main import create_app
 from app.models.identity import AccountType
 from app.schemas.auth import (
@@ -10,6 +9,7 @@ from app.schemas.auth import (
     IdentityResponse,
     KeycloakTokenResponse,
 )
+from app.services.keycloak_token_broker import KeycloakTokenBrokerUnavailable
 
 
 class FakeDatabase:
