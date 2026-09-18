@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
+from app.services.keycloak_token_broker import KeycloakTokenBrokerUnavailable
 from app.main import create_app
 from app.models.identity import AccountType
 from app.schemas.auth import (
@@ -60,6 +61,20 @@ class FakeKeycloakTokenBroker:
         )
 
 
+class InvalidKeycloakTokenBroker:
+    """Raise the same generic invalid-credential exception as Keycloak."""
+
+    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+        raise InvalidCredentialsError
+
+
+class UnavailableKeycloakTokenBroker:
+    """Simulate a broker outage without exposing implementation details."""
+
+    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+        raise KeycloakTokenBrokerUnavailable("unavailable")
+
+
 class RejectingAuthService:
     """Reject all credentials using the production domain exception."""
 
@@ -68,12 +83,17 @@ class RejectingAuthService:
         raise InvalidCredentialsError
 
 
-def build_client(*, ready: bool = True, rejecting: bool = False) -> TestClient:
+def build_client(
+    *,
+    ready: bool = True,
+    rejecting: bool = False,
+    token_broker=None,
+) -> TestClient:
     """Build an isolated app that never inherits CI Redis configuration."""
     settings = Settings(database_url="postgresql://unused", redis_url=None)
     database = FakeDatabase(ready=ready)
     auth_service = RejectingAuthService() if rejecting else FakeAuthService()
-    token_broker = FakeKeycloakTokenBroker()
+    token_broker = token_broker or FakeKeycloakTokenBroker()
     app = create_app(
         settings=settings,
         database=database,  # type: ignore[arg-type]
@@ -136,3 +156,25 @@ def test_token_login_relays_a_keycloak_token() -> None:
         "token_type": "Bearer",
         "scope": "openid ouros-identity",
     }
+
+
+def test_token_login_returns_generic_401_for_rejected_credentials() -> None:
+    """Keep Keycloak's invalid-grant response free of account-enumeration detail."""
+    with build_client(token_broker=InvalidKeycloakTokenBroker()) as client:
+        response = client.post(
+            "/v1/auth/token",
+            json={"email": "user@example.com", "password": "wrong"},
+        )
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Credenciais inválidas."}
+
+
+def test_token_login_returns_503_when_broker_is_unavailable() -> None:
+    """Do not leak Keycloak transport or client-secret diagnostics to callers."""
+    with build_client(token_broker=UnavailableKeycloakTokenBroker()) as client:
+        response = client.post(
+            "/v1/auth/token",
+            json={"email": "user@example.com", "password": "Senha123!"},
+        )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Autenticação temporariamente indisponível."}
