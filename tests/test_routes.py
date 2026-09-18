@@ -4,7 +4,11 @@ from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
 from app.main import create_app
 from app.models.identity import AccountType
-from app.schemas.auth import CredentialVerificationResponse, IdentityResponse
+from app.schemas.auth import (
+    CredentialVerificationResponse,
+    IdentityResponse,
+    KeycloakTokenResponse,
+)
 
 
 class FakeDatabase:
@@ -42,6 +46,20 @@ class FakeAuthService:
         )
 
 
+class FakeKeycloakTokenBroker:
+    """Return a deterministic Keycloak-issued token without network I/O."""
+
+    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+        return KeycloakTokenResponse(
+            access_token="keycloak-signed-access-token",
+            expires_in=600,
+            refresh_expires_in=1800,
+            refresh_token="keycloak-signed-refresh-token",
+            token_type="Bearer",
+            scope="openid ouros-identity",
+        )
+
+
 class RejectingAuthService:
     """Reject all credentials using the production domain exception."""
 
@@ -55,10 +73,12 @@ def build_client(*, ready: bool = True, rejecting: bool = False) -> TestClient:
     settings = Settings(database_url="postgresql://unused", redis_url=None)
     database = FakeDatabase(ready=ready)
     auth_service = RejectingAuthService() if rejecting else FakeAuthService()
+    token_broker = FakeKeycloakTokenBroker()
     app = create_app(
         settings=settings,
         database=database,  # type: ignore[arg-type]
         auth_service=auth_service,  # type: ignore[arg-type]
+        keycloak_token_broker=token_broker,  # type: ignore[arg-type]
     )
     return TestClient(app)
 
@@ -98,3 +118,21 @@ def test_verify_credentials_returns_generic_401() -> None:
         )
     assert response.status_code == 401
     assert response.json() == {"detail": "Credenciais inválidas."}
+
+
+def test_token_login_relays_a_keycloak_token() -> None:
+    """Keep the official login endpoint simple for first-party clients."""
+    with build_client() as client:
+        response = client.post(
+            "/v1/auth/token",
+            json={"email": "user@example.com", "password": "Senha123!"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {
+        "access_token": "keycloak-signed-access-token",
+        "expires_in": 600,
+        "refresh_expires_in": 1800,
+        "refresh_token": "keycloak-signed-refresh-token",
+        "token_type": "Bearer",
+        "scope": "openid ouros-identity",
+    }
