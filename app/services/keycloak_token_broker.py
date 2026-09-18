@@ -12,7 +12,11 @@ class KeycloakTokenBrokerUnavailable(RuntimeError):
 class KeycloakTokenBroker:
     """Relay first-party password logins to Keycloak without minting local JWTs."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._token_url = (
             f"{settings.keycloak_issuer_url.rstrip('/')}/protocol/openid-connect/token"
         )
@@ -20,6 +24,7 @@ class KeycloakTokenBroker:
         self._client_secret = settings.keycloak_token_broker_client_secret
         self._scope = settings.keycloak_token_broker_scope
         self._timeout_seconds = settings.keycloak_token_broker_timeout_seconds
+        self._transport = transport
 
     async def issue_password_token(
         self,
@@ -38,7 +43,10 @@ class KeycloakTokenBroker:
             "scope": self._scope,
         }
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                transport=self._transport,
+            ) as client:
                 response = await client.post(self._token_url, data=form)
         except httpx.HTTPError as exc:
             raise KeycloakTokenBrokerUnavailable("Keycloak token endpoint unavailable") from exc
