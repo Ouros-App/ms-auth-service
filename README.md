@@ -247,3 +247,34 @@ MIT. See [LICENSE](LICENSE).
 <!-- CONTRIBUTORS:START -->
 - [@Nicolas25vlad](https://github.com/Nicolas25vlad)
 <!-- CONTRIBUTORS:END -->
+
+
+## Official Keycloak token login
+
+`POST /v1/auth/token` is the official first-party login endpoint for web backends,
+mobile applications and trusted Ouros clients that need a Keycloak JWT without a
+browser redirect. It keeps the existing `/v1/auth/credentials/verify` endpoint
+unchanged for compatibility.
+
+```json
+{
+  "email": "user@example.com",
+  "password": "your-password"
+}
+```
+
+The response is relayed from Keycloak and includes `access_token`,
+`expires_in`, `refresh_token`, `refresh_expires_in`, `token_type` and
+`scope`. The service never creates or signs JWTs itself.
+
+Required runtime secrets:
+
+- `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET`: secret for the
+  `ms-auth-service-broker` Keycloak client;
+- `KEYCLOAK_TOKEN_BROKER_CLIENT_ID` is optional and defaults to
+  `ms-auth-service-broker`.
+
+The endpoint shares the credential rate limiter, returns the same generic 401
+for invalid credentials and returns 503 when Keycloak or its broker configuration
+is unavailable. Do not log request bodies, passwords, access tokens or refresh
+tokens.
