@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     keycloak_issuer_url: str = "https://ouros-keycloak.discloud.app/realms/ouros"
     keycloak_internal_audience: str = "ms-auth-service-internal"
     keycloak_internal_client_id: str = "keycloak-user-storage"
+
+    keycloak_token_broker_client_id: str = "ms-auth-service-broker"
+    keycloak_token_broker_client_secret: SecretStr | None = None
+    keycloak_token_broker_scope: str = "openid ouros-identity"
+    keycloak_token_broker_timeout_seconds: float = Field(default=5.0, gt=0)
 
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":

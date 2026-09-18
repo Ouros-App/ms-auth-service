@@ -57,3 +57,31 @@ class IdentityResponse(BaseModel):
 class CredentialVerificationResponse(BaseModel):
     authenticated: Literal[True] = True
     identity: IdentityResponse
+
+
+class TokenLoginRequest(BaseModel):
+    """Credentials accepted by the official Keycloak token broker."""
+
+    email: str = Field(min_length=3, max_length=255)
+    password: SecretStr
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_shape(cls, value: str) -> str:
+        return CredentialVerificationRequest.validate_email_shape(value)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_length(cls, value: SecretStr) -> SecretStr:
+        return CredentialVerificationRequest.validate_password_length(value)
+
+
+class KeycloakTokenResponse(BaseModel):
+    """A user token minted by Keycloak and relayed without modification."""
+
+    access_token: str = Field(min_length=1)
+    expires_in: int = Field(gt=0)
+    refresh_expires_in: int | None = Field(default=None, ge=0)
+    refresh_token: str | None = None
+    token_type: Literal["Bearer"]
+    scope: str | None = None

@@ -18,6 +18,10 @@ from app.core.rate_limit import RateLimiter
 from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
+from app.services.keycloak_token_broker import (
+    KeycloakTokenBroker,
+    KeycloakTokenBrokerUnavailable,
+)
 
 
 def create_app(
@@ -26,6 +30,7 @@ def create_app(
     auth_service: AuthService | None = None,
     rate_limiter: RateLimiter | None = None,
     service_token_verifier: KeycloakServiceTokenVerifier | None = None,
+    keycloak_token_broker: KeycloakTokenBroker | None = None,
 ) -> FastAPI:
     """Build the FastAPI application and wire its shared services."""
     if settings is None:
@@ -38,6 +43,9 @@ def create_app(
         IdentityRepository(resolved_database)
     )
     resolved_rate_limiter = rate_limiter or RateLimiter(resolved_settings)
+    resolved_keycloak_token_broker = keycloak_token_broker or KeycloakTokenBroker(
+        resolved_settings
+    )
     resolved_service_token_verifier = (
         service_token_verifier
         or KeycloakServiceTokenVerifier(resolved_settings)
@@ -50,6 +58,7 @@ def create_app(
         application.state.auth_service = resolved_auth_service
         application.state.rate_limiter = resolved_rate_limiter
         application.state.service_token_verifier = resolved_service_token_verifier
+        application.state.keycloak_token_broker = resolved_keycloak_token_broker
         try:
             yield
         finally:
@@ -65,6 +74,17 @@ def create_app(
         ),
         lifespan=lifespan,
     )
+
+    @application.exception_handler(KeycloakTokenBrokerUnavailable)
+    async def keycloak_token_broker_unavailable_handler(
+        _request: Request,
+        _exception: KeycloakTokenBrokerUnavailable,
+    ) -> JSONResponse:
+        """Avoid leaking Keycloak or broker configuration details."""
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Autenticação temporariamente indisponível."},
+        )
 
     @application.exception_handler(InvalidCredentialsError)
     async def invalid_credentials_handler(
