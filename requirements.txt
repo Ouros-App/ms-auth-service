@@ -4,6 +4,7 @@ fastapi==0.115.6
 httpx==0.28.1
 infisicalsdk==1.0.14
 pydantic-settings==2.7.1
+PyJWT[crypto]==2.14.0
 python-dotenv==1.1.1
 redis==5.2.1
 uvicorn[standard]==0.34.0

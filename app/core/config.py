@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     auth_rate_limit_ip_per_15_minutes: int = Field(default=20, ge=1)
     auth_rate_limit_email_per_15_minutes: int = Field(default=5, ge=1)
 
+    keycloak_issuer_url: str = "https://ouros-keycloak.discloud.app/realms/ouros"
+    keycloak_internal_audience: str = "ms-auth-service-internal"
+    keycloak_internal_client_id: str = "keycloak-user-storage"
+
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":
         if self.database_max_pool_size < self.database_min_pool_size:
