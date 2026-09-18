@@ -13,11 +13,11 @@
 
 Central authentication service for Ouros.
 
-## Current milestone: M2
+## Current milestone: M3 bridge
 
-This service currently owns **credential verification against the production PostgreSQL identity tables**. It does not mint an Ouros JWT yet.
+This service owns **credential verification against the production PostgreSQL identity tables** and exposes an authenticated internal bridge for the Keycloak User Storage provider. It still does not mint an Ouros JWT: Keycloak is the only issuer for the new user access and refresh tokens.
 
-That boundary is intentional: the old Spring API signs its own JWT after validating bcrypt passwords, while the target architecture uses Keycloak as the token issuer. M2 moves password validation out of application APIs without introducing a second homemade token format.
+The public M2 contract remains unchanged so the existing Spring/mobile authentication path keeps working during migration. M3 adds only internal endpoints used by Keycloak.
 
 ### Supported identities
 
@@ -112,17 +112,23 @@ When `REDIS_URL` is configured, counters live in Redis and are shared across rep
 - The API does not log passwords and Pydantic represents the request password as `SecretStr`.
 - No JWT is generated locally in this service.
 
-## Why M2 stops before token issuance
+## Keycloak User Storage bridge
 
-Keycloak `client_credentials` represents a service account, not the logged-in user. A user access token must be issued only after Keycloak can authenticate or trust the corresponding user identity. The next milestone will add that bridge deliberately rather than impersonating a user with a machine token.
-
-The intended M3 contract is:
+The new authentication path is:
 
 ```text
-mobile/web -> ms-auth-service -> credential authority -> Keycloak -> access + refresh token
+mobile/web
+  -> Keycloak Authorization Code + PKCE
+  -> Ouros User Storage SPI
+  -> Keycloak service-account JWT
+  -> ms-auth-service /internal/v1/*
+  -> legacy identity tables
+  -> Keycloak access_token + refresh_token
 ```
 
-The exact Keycloak credential-federation mechanism is kept outside this PR so password authority is not silently duplicated into Keycloak.
+The internal bridge supports lookup by normalized email, lookup by stable `account_type + database_id`, and password verification. Every internal request requires a short-lived Keycloak service token whose RS256 signature, issuer, audience, expiry and `azp` are verified locally against Keycloak JWKS.
+
+`client_credentials` is used only to authenticate the Keycloak provider to this internal API. It never represents the logged-in human.
 
 ## Configuration and Infisical
 
@@ -163,6 +169,9 @@ Additional runtime configuration:
 
 ```dotenv
 APP_NAME=ouros-auth-service
+KEYCLOAK_ISSUER_URL=https://ouros-keycloak.discloud.app/realms/ouros
+KEYCLOAK_INTERNAL_AUDIENCE=ms-auth-service-internal
+KEYCLOAK_INTERNAL_CLIENT_ID=keycloak-user-storage
 APP_PORT=8000
 DATABASE_MIN_POOL_SIZE=1
 DATABASE_MAX_POOL_SIZE=10
@@ -193,20 +202,23 @@ Swagger UI is available at `/docs`.
 pytest
 ```
 
-The suite covers successful and rejected authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility, Infisical loading, HTTP error behavior and rate limiting.
+The suite covers successful and rejected public authentication, unknown-user timing work, account-type forwarding, ambiguous identities, bcrypt compatibility, Infisical loading, HTTP error behavior, rate limiting, internal identity lookup and the Keycloak service-JWT contract including issuer, audience, `azp`, expiry, required claims, signing algorithm and JWKS refresh behavior.
 
 ## Structure
 
 ```text
 app/
-├── api/routes.py
+├── api/
+│   ├── routes.py
+│   └── internal_routes.py
 ├── core/
 │   ├── config.py
 │   ├── database.py
 │   ├── errors.py
 │   ├── infisical.py
 │   ├── rate_limit.py
-│   └── security.py
+│   ├── security.py
+│   └── service_auth.py
 ├── models/identity.py
 ├── repositories/identity_repository.py
 ├── schemas/
@@ -220,8 +232,8 @@ app/
 
 ```text
 M1  Keycloak + clients-as-code                 done
-M2  central credential verification           this service
-M3  user access/refresh tokens from Keycloak   next
+M2  central credential verification           done
+M3  Keycloak User Storage bridge              this PR + ouros-keycloak PR #5
 M4  telemetry validates Keycloak JWT           planned
 M5+ remaining Ouros services                    planned
 ```
