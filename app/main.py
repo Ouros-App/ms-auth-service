@@ -16,12 +16,12 @@ from app.core.errors import (
 from app.core.infisical import load_infisical_secrets
 from app.core.rate_limit import RateLimiter
 from app.core.service_auth import KeycloakServiceTokenVerifier
+from app.repositories.identity_repository import IdentityRepository
+from app.services.auth_service import AuthService
 from app.services.keycloak_token_broker import (
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
 )
-from app.repositories.identity_repository import IdentityRepository
-from app.services.auth_service import AuthService
 
 
 def create_app(
