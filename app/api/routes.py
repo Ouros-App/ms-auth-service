@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.database import Database
 from app.core.rate_limit import RateLimiter
-from app.services.keycloak_token_broker import KeycloakTokenBroker
 from app.schemas.auth import (
     CredentialVerificationRequest,
     CredentialVerificationResponse,
@@ -13,6 +12,7 @@ from app.schemas.auth import (
 )
 from app.schemas.common import HealthResponse, ReadinessResponse
 from app.services.auth_service import AuthService
+from app.services.keycloak_token_broker import KeycloakTokenBroker
 
 router = APIRouter()
 
