@@ -251,30 +251,102 @@ MIT. See [LICENSE](LICENSE).
 
 ## Official Keycloak token login
 
-`POST /v1/auth/token` is the official first-party login endpoint for web backends,
-mobile applications and trusted Ouros clients that need a Keycloak JWT without a
-browser redirect. It keeps the existing `/v1/auth/credentials/verify` endpoint
-unchanged for compatibility.
+`POST /v1/auth/token` is the official first-party login contract for Ouros applications that need a Keycloak JWT without a browser redirect. It keeps the legacy credential-verification endpoint unchanged.
 
-```json
+```text
+Web backend / mobile / trusted Ouros client
+  -> ms-auth-service /v1/auth/token
+  -> Keycloak token endpoint (confidential broker client)
+  -> Keycloak User Storage
+  -> ms-auth-service internal credential verification
+  -> Keycloak-issued JWT returned to the caller
+```
+
+The service does not create, modify or sign JWTs. Keycloak remains the sole issuer, and all APIs continue validating its issuer, JWKS signature, expiry, audience and roles.
+
+### Endpoint contract
+
+```http
+POST /v1/auth/token
+Content-Type: application/json
+
 {
   "email": "user@example.com",
   "password": "your-password"
 }
 ```
 
-The response is relayed from Keycloak and includes `access_token`,
-`expires_in`, `refresh_token`, `refresh_expires_in`, `token_type` and
-`scope`. The service never creates or signs JWTs itself.
+Successful response (`200`):
 
-Required runtime secrets:
+```json
+{
+  "access_token": "<Keycloak JWT>",
+  "expires_in": 600,
+  "refresh_expires_in": 1800,
+  "refresh_token": "<Keycloak refresh token>",
+  "token_type": "Bearer",
+  "scope": "openid ouros-identity"
+}
+```
 
-- `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET`: secret for the
-  `ms-auth-service-broker` Keycloak client;
-- `KEYCLOAK_TOKEN_BROKER_CLIENT_ID` is optional and defaults to
-  `ms-auth-service-broker`.
+Use the access token only over TLS:
 
-The endpoint shares the credential rate limiter, returns the same generic 401
-for invalid credentials and returns 503 when Keycloak or its broker configuration
-is unavailable. Do not log request bodies, passwords, access tokens or refresh
-tokens.
+```http
+Authorization: Bearer <access_token>
+```
+
+The token includes the federated identity claims issued by Keycloak, including `database_id`, `account_type`, `farm_id` or `enterprise_id`, and the realm role. Consumers must not trust decoded claims without validating the JWT signature.
+
+### Client integration rules
+
+- **Web:** prefer a backend-for-frontend (BFF). Keep the refresh token server-side and expose an `HttpOnly`, `Secure`, `SameSite` session cookie to the browser.
+- **Mobile:** store tokens only in the platform secure store (Android Keystore / iOS Keychain). Never use normal preferences or application logs.
+- **Server-to-server:** use Client Credentials instead of this endpoint; no user password should be involved.
+- **Public third-party integrations:** use Authorization Code + PKCE rather than the password broker.
+- The endpoint is for first-party Ouros applications. Do not embed the broker client secret in web or mobile applications.
+
+At present, token refresh must remain server-managed because the Keycloak broker client secret is intentionally unavailable to callers. A caller that cannot safely keep a refresh token should log in again when the access token expires.
+
+### Errors and rate limits
+
+| Status | Meaning | Safe client behavior |
+| --- | --- | --- |
+| `200` | Keycloak authenticated the user and minted a token. | Use the access token until `expires_in`. |
+| `401` | Invalid credentials. The response is intentionally generic. | Show a generic login error. |
+| `422` | Invalid request shape, email or password length. | Correct the request; do not retry automatically. |
+| `429` | Too many credential attempts. | Respect the `Retry-After` header. |
+| `503` | Keycloak is unavailable or the broker secret is absent. | Retry with backoff; do not expose internal diagnostics. |
+
+`/v1/auth/token` shares the distributed Redis-backed credential limiter with `/v1/auth/credentials/verify`. Passwords, access tokens and refresh tokens must never be written to logs, analytics, error trackers or browser storage.
+
+### Compatibility
+
+| Endpoint | Status | Purpose |
+| --- | --- | --- |
+| `POST /v1/auth/credentials/verify` | Maintained | Existing credential verification flow; returns identity only. |
+| `POST /v1/auth/token` | Official | First-party login broker; returns a Keycloak-issued token. |
+
+### Required configuration
+
+The Keycloak deployment must first reconcile the confidential client `ms-auth-service-broker` through the matching `ouros-keycloak` IaC change. Obtain or generate that client's secret in Keycloak and store it only in the `ms-auth-service` secret manager.
+
+```dotenv
+KEYCLOAK_ISSUER_URL=https://ouros-keycloak.discloud.app/realms/ouros
+KEYCLOAK_TOKEN_BROKER_CLIENT_ID=ms-auth-service-broker
+KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET=<secret-from-keycloak>
+KEYCLOAK_TOKEN_BROKER_SCOPE=openid ouros-identity
+KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS=5
+```
+
+`KEYCLOAK_TOKEN_BROKER_CLIENT_ID`, `KEYCLOAK_TOKEN_BROKER_SCOPE` and `KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS` have safe defaults. `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET` is required only for `/v1/auth/token`; without it, the legacy endpoints still work and the token endpoint returns `503`.
+
+### Rollout checklist
+
+1. Merge and deploy the Keycloak IaC change that creates `ms-auth-service-broker` with Direct Access Grants enabled only for that confidential client.
+2. Store the generated client secret in Infisical as `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET` for `ms-auth-service`.
+3. Merge and deploy the `ms-auth-service` token-broker change.
+4. Check `/ready` returns `200`.
+5. Use a QA account to call `/v1/auth/token`; validate the returned JWT locally and call one protected API with it.
+6. Verify invalid-password attempts return generic `401` and repeated attempts receive `429`.
+
+Never commit a client secret or an example production token.
