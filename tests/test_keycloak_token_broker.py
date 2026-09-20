@@ -136,6 +136,7 @@ def test_broker_validates_full_ouros_token_contract() -> None:
     ]
     claims = {
         "sub": "keycloak-subject",
+        "azp": "ms-auth-service-broker",
         "iss": "https://ouros-keycloak.discloud.app/realms/ouros",
         "aud": audiences,
         "iat": 1_700_000_000,
@@ -168,6 +169,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
     broker = KeycloakTokenBroker(make_settings())
     claims = {
         "sub": "subject",
+        "azp": "ms-auth-service-broker",
         "aud": ["ms-ai-server"],
         "database_id": 42,
         "account_type": "farm_owner",
@@ -192,6 +194,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
     [
         {
             "sub": "subject",
+        "azp": "ms-auth-service-broker",
             "aud": [
                 "ms-spring-api",
                 "ms-telemetry-dashboard-service",
@@ -205,6 +208,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
         },
         {
             "sub": "subject",
+        "azp": "ms-auth-service-broker",
             "aud": [
                 "ms-spring-api",
                 "ms-telemetry-dashboard-service",
@@ -220,6 +224,37 @@ def test_broker_rejects_missing_resource_audience() -> None:
 )
 def test_broker_rejects_invalid_signed_business_identity(claims: dict) -> None:
     broker = KeycloakTokenBroker(make_settings())
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
+
+
+
+def test_broker_rejects_wrong_authorized_party() -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "another-client",
+        "aud": [
+            "ms-spring-api",
+            "ms-telemetry-dashboard-service",
+            "ms-ai-server",
+            "ms-mcp-server-ouros-knowledge",
+            "ms-mcp-server-ouros-knowledge-codemode",
+        ],
+        "database_id": 42,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
     with (
         patch(
             "app.services.keycloak_token_broker._get_jwks_client",
