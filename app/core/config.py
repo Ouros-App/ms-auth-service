@@ -39,10 +39,6 @@ class Settings(BaseSettings):
     keycloak_token_broker_scope: str = "openid ouros-identity"
     keycloak_token_broker_timeout_seconds: float = Field(default=5.0, gt=0)
     keycloak_token_broker_jwks_url: str | None = None
-    keycloak_token_broker_expected_audiences: str = (
-        "ms-spring-api|ms-telemetry-dashboard-service|ms-ai-server|"
-        "ms-mcp-server-ouros-knowledge|ms-mcp-server-ouros-knowledge-codemode"
-    )
 
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":
