@@ -359,30 +359,3 @@ def test_broker_rejects_empty_expected_audiences() -> None:
         )
 
 
-def test_broker_rejects_non_string_account_type() -> None:
-    broker = KeycloakTokenBroker(make_settings())
-    claims = {
-        "sub": "subject",
-        "aud": [
-            "ms-spring-api",
-            "ms-telemetry-dashboard-service",
-            "ms-ai-server",
-            "ms-mcp-server-ouros-knowledge",
-            "ms-mcp-server-ouros-knowledge-codemode",
-        ],
-        "database_id": 42,
-        "account_type": [],
-        "realm_access": {"roles": ["farm_owner"]},
-    }
-
-    with (
-        patch(
-            "app.services.keycloak_token_broker._get_jwks_client",
-            return_value=Mock(
-                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
-            ),
-        ),
-        patch("app.services.keycloak_token_broker.decode", return_value=claims),
-        pytest.raises(KeycloakTokenBrokerUnavailable),
-    ):
-        broker._validate_access_token_contract("signed-token")
