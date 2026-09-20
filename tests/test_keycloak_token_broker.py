@@ -8,6 +8,7 @@ from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
 from app.schemas.auth import TokenLoginRequest
 from app.services.keycloak_token_broker import (
+    REQUIRED_FIRST_PARTY_AUDIENCES,
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
 )
@@ -350,3 +351,29 @@ def test_broker_accepts_numeric_database_id_encoded_as_string() -> None:
         patch("app.services.keycloak_token_broker.decode", return_value=claims),
     ):
         assert broker._validate_access_token_contract("signed-token") == claims
+
+
+
+def test_broker_rejects_oversized_decimal_database_id() -> None:
+    """Map Python's oversized decimal conversion failure to broker unavailability."""
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "ms-auth-service-broker",
+        "aud": list(REQUIRED_FIRST_PARTY_AUDIENCES),
+        "database_id": "9" * 5000,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
