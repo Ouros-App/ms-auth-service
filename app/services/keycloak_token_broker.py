@@ -10,6 +10,15 @@ from app.core.errors import InvalidCredentialsError
 from app.schemas.auth import KeycloakTokenResponse, TokenLoginRequest
 
 VALID_ACCOUNT_TYPES = {"farm_owner", "company_employee", "admin"}
+REQUIRED_FIRST_PARTY_AUDIENCES = frozenset(
+    {
+        "ms-spring-api",
+        "ms-telemetry-dashboard-service",
+        "ms-ai-server",
+        "ms-mcp-server-ouros-knowledge",
+        "ms-mcp-server-ouros-knowledge-codemode",
+    }
+)
 
 
 class KeycloakTokenBrokerUnavailable(RuntimeError):
@@ -39,11 +48,7 @@ class KeycloakTokenBroker:
         self._client_secret = settings.keycloak_token_broker_client_secret
         self._scope = settings.keycloak_token_broker_scope
         self._timeout_seconds = settings.keycloak_token_broker_timeout_seconds
-        self._expected_audiences = frozenset(
-            audience.strip()
-            for audience in settings.keycloak_token_broker_expected_audiences.split("|")
-            if audience.strip()
-        )
+        self._expected_audiences = REQUIRED_FIRST_PARTY_AUDIENCES
         self._transport = transport
 
     def _validate_access_token_contract(self, token: str) -> dict:
@@ -78,6 +83,11 @@ class KeycloakTokenBroker:
         if not self._expected_audiences.issubset(audience_set):
             raise KeycloakTokenBrokerUnavailable(
                 "Keycloak access token is missing required Ouros audiences"
+            )
+
+        if claims.get("azp") != self._client_id:
+            raise KeycloakTokenBrokerUnavailable(
+                "Keycloak access token was not issued to the official broker"
             )
 
         account_type = claims.get("account_type")
