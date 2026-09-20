@@ -10,6 +10,7 @@ from app.core.errors import InvalidCredentialsError
 from app.schemas.auth import KeycloakTokenResponse, TokenLoginRequest
 
 VALID_ACCOUNT_TYPES = {"farm_owner", "company_employee", "admin"}
+INVALID_DATABASE_ID_DETAIL = "invalid database_id claim"
 REQUIRED_FIRST_PARTY_AUDIENCES = frozenset(
     {
         "ms-spring-api",
@@ -28,6 +29,28 @@ class KeycloakTokenBrokerUnavailable(RuntimeError):
 @lru_cache(maxsize=8)
 def _get_jwks_client(jwks_url: str) -> PyJWKClient:
     return PyJWKClient(jwks_url, cache_keys=True, lifespan=300)
+
+
+def _audience_set(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return set(value)
+    return set()
+
+
+def _positive_database_id(value: object) -> int:
+    if isinstance(value, bool):
+        raise KeycloakTokenBrokerUnavailable(INVALID_DATABASE_ID_DETAIL)
+    if isinstance(value, int):
+        numeric_id = value
+    elif isinstance(value, str) and value.isascii() and value.isdecimal():
+        numeric_id = int(value)
+    else:
+        raise KeycloakTokenBrokerUnavailable(INVALID_DATABASE_ID_DETAIL)
+    if numeric_id <= 0:
+        raise KeycloakTokenBrokerUnavailable(INVALID_DATABASE_ID_DETAIL)
+    return numeric_id
 
 
 class KeycloakTokenBroker:
@@ -72,14 +95,7 @@ class KeycloakTokenBroker:
                 "Keycloak issued an access token that failed local validation"
             ) from exc
 
-        audiences = claims.get("aud")
-        if isinstance(audiences, str):
-            audience_set = {audiences}
-        elif isinstance(audiences, list) and all(isinstance(item, str) for item in audiences):
-            audience_set = set(audiences)
-        else:
-            audience_set = set()
-
+        audience_set = _audience_set(claims.get("aud"))
         if not self._expected_audiences.issubset(audience_set):
             raise KeycloakTokenBrokerUnavailable(
                 "Keycloak access token is missing required Ouros audiences"
@@ -104,17 +120,7 @@ class KeycloakTokenBroker:
                 "Keycloak access token is missing the signed Ouros account role"
             )
 
-        if isinstance(database_id, bool):
-            raise KeycloakTokenBrokerUnavailable("invalid database_id claim")
-        if isinstance(database_id, int):
-            numeric_id = database_id
-        elif isinstance(database_id, str) and database_id.isascii() and database_id.isdecimal():
-            numeric_id = int(database_id)
-        else:
-            raise KeycloakTokenBrokerUnavailable("invalid database_id claim")
-        if numeric_id <= 0:
-            raise KeycloakTokenBrokerUnavailable("invalid database_id claim")
-
+        _positive_database_id(database_id)
         return claims
 
     async def issue_password_token(
