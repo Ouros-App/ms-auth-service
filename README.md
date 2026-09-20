@@ -339,7 +339,6 @@ KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET=<secret-from-keycloak>
 KEYCLOAK_TOKEN_BROKER_SCOPE=openid ouros-identity
 KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS=5
 KEYCLOAK_TOKEN_BROKER_JWKS_URL=
-KEYCLOAK_TOKEN_BROKER_EXPECTED_AUDIENCES=ms-spring-api|ms-telemetry-dashboard-service|ms-ai-server|ms-mcp-server-ouros-knowledge|ms-mcp-server-ouros-knowledge-codemode
 ```
 
 `KEYCLOAK_TOKEN_BROKER_CLIENT_ID`, `KEYCLOAK_TOKEN_BROKER_SCOPE` and `KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS` have safe defaults. `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET` is required only for `/v1/auth/token`; without it, the legacy endpoints still work and the token endpoint returns `503`.
