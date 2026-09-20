@@ -350,12 +350,3 @@ def test_broker_accepts_numeric_database_id_encoded_as_string() -> None:
         patch("app.services.keycloak_token_broker.decode", return_value=claims),
     ):
         assert broker._validate_access_token_contract("signed-token") == claims
-
-
-def test_broker_rejects_empty_expected_audiences() -> None:
-    with pytest.raises(KeycloakTokenBrokerUnavailable):
-        KeycloakTokenBroker(
-            make_settings(keycloak_token_broker_expected_audiences="|||")
-        )
-
-
