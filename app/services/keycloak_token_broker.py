@@ -45,7 +45,12 @@ def _positive_database_id(value: object) -> int:
     if isinstance(value, int):
         numeric_id = value
     elif isinstance(value, str) and value.isascii() and value.isdecimal():
-        numeric_id = int(value)
+        try:
+            numeric_id = int(value)
+        except ValueError as exc:
+            raise KeycloakTokenBrokerUnavailable(
+                INVALID_DATABASE_ID_DETAIL
+            ) from exc
     else:
         raise KeycloakTokenBrokerUnavailable(INVALID_DATABASE_ID_DETAIL)
     if numeric_id <= 0:
