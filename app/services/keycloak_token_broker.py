@@ -1,36 +1,116 @@
+import asyncio
+from functools import lru_cache
+
 import httpx
+from jwt import InvalidTokenError, PyJWKClient, decode
+from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
 from app.schemas.auth import KeycloakTokenResponse, TokenLoginRequest
 
+VALID_ACCOUNT_TYPES = {"farm_owner", "company_employee", "admin"}
+
 
 class KeycloakTokenBrokerUnavailable(RuntimeError):
-    """Raised when the Keycloak password-grant broker cannot issue a token."""
+    """Raised when the Keycloak password-grant broker cannot issue a valid token."""
+
+
+@lru_cache(maxsize=8)
+def _get_jwks_client(jwks_url: str) -> PyJWKClient:
+    return PyJWKClient(jwks_url, cache_keys=True, lifespan=300)
 
 
 class KeycloakTokenBroker:
-    """Relay first-party password logins to Keycloak without minting local JWTs."""
+    """Relay first-party password logins and enforce the Ouros JWT contract."""
 
     def __init__(
         self,
         settings: Settings,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._token_url = (
-            f"{settings.keycloak_issuer_url.rstrip('/')}/protocol/openid-connect/token"
+        self._issuer = settings.keycloak_issuer_url.rstrip("/")
+        self._token_url = f"{self._issuer}/protocol/openid-connect/token"
+        self._jwks_url = (
+            settings.keycloak_token_broker_jwks_url
+            or f"{self._issuer}/protocol/openid-connect/certs"
         )
         self._client_id = settings.keycloak_token_broker_client_id
         self._client_secret = settings.keycloak_token_broker_client_secret
         self._scope = settings.keycloak_token_broker_scope
         self._timeout_seconds = settings.keycloak_token_broker_timeout_seconds
+        self._expected_audiences = frozenset(
+            audience.strip()
+            for audience in settings.keycloak_token_broker_expected_audiences.split("|")
+            if audience.strip()
+        )
         self._transport = transport
+
+    def _validate_access_token_contract(self, token: str) -> dict:
+        """Validate signature, issuer, audiences and signed business identity."""
+
+        try:
+            signing_key = _get_jwks_client(self._jwks_url).get_signing_key_from_jwt(token)
+            claims = decode(
+                token,
+                signing_key.key,
+                algorithms=["RS256"],
+                issuer=self._issuer,
+                audience=list(self._expected_audiences),
+                options={
+                    "require": ["exp", "iat", "iss", "aud", "sub"],
+                    "verify_aud": False,
+                },
+            )
+        except (InvalidTokenError, PyJWKClientError, ValueError) as exc:
+            raise KeycloakTokenBrokerUnavailable(
+                "Keycloak issued an access token that failed local validation"
+            ) from exc
+
+        audiences = claims.get("aud")
+        if isinstance(audiences, str):
+            audience_set = {audiences}
+        elif isinstance(audiences, list) and all(isinstance(item, str) for item in audiences):
+            audience_set = set(audiences)
+        else:
+            audience_set = set()
+
+        if not self._expected_audiences.issubset(audience_set):
+            raise KeycloakTokenBrokerUnavailable(
+                "Keycloak access token is missing required Ouros audiences"
+            )
+
+        account_type = claims.get("account_type")
+        database_id = claims.get("database_id")
+        realm_access = claims.get("realm_access")
+        roles = realm_access.get("roles") if isinstance(realm_access, dict) else None
+        if (
+            account_type not in VALID_ACCOUNT_TYPES
+            or not isinstance(roles, list)
+            or account_type not in roles
+        ):
+            raise KeycloakTokenBrokerUnavailable(
+                "Keycloak access token is missing the signed Ouros account role"
+            )
+
+        if isinstance(database_id, bool):
+            raise KeycloakTokenBrokerUnavailable("invalid database_id claim")
+        if isinstance(database_id, int):
+            numeric_id = database_id
+        elif isinstance(database_id, str) and database_id.isascii() and database_id.isdecimal():
+            numeric_id = int(database_id)
+        else:
+            raise KeycloakTokenBrokerUnavailable("invalid database_id claim")
+        if numeric_id <= 0:
+            raise KeycloakTokenBrokerUnavailable("invalid database_id claim")
+
+        return claims
 
     async def issue_password_token(
         self,
         credentials: TokenLoginRequest,
     ) -> KeycloakTokenResponse:
-        """Request a Keycloak-minted token for one rate-limited login attempt."""
+        """Request and locally verify a Keycloak-minted user token."""
         if self._client_secret is None:
             raise KeycloakTokenBrokerUnavailable("broker client secret is not configured")
 
@@ -57,6 +137,17 @@ class KeycloakTokenBroker:
             raise KeycloakTokenBrokerUnavailable("Keycloak token endpoint rejected request")
 
         try:
-            return KeycloakTokenResponse.model_validate(response.json())
+            token_response = KeycloakTokenResponse.model_validate(response.json())
         except (ValueError, TypeError) as exc:
             raise KeycloakTokenBrokerUnavailable("invalid Keycloak token response") from exc
+
+        try:
+            await asyncio.to_thread(
+                self._validate_access_token_contract,
+                token_response.access_token,
+            )
+        except PyJWKClientConnectionError as exc:
+            raise KeycloakTokenBrokerUnavailable(
+                "Keycloak signing keys are unavailable"
+            ) from exc
+        return token_response
