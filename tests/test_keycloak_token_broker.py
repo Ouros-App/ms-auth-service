@@ -1,8 +1,8 @@
 import asyncio
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
-from unittest.mock import Mock, patch
 
 from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
