@@ -95,7 +95,8 @@ class KeycloakTokenBroker:
         realm_access = claims.get("realm_access")
         roles = realm_access.get("roles") if isinstance(realm_access, dict) else None
         if (
-            account_type not in VALID_ACCOUNT_TYPES
+            not isinstance(account_type, str)
+            or account_type not in VALID_ACCOUNT_TYPES
             or not isinstance(roles, list)
             or account_type not in roles
         ):
