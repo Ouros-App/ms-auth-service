@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     keycloak_internal_audience: str = "ms-auth-service-internal"
     keycloak_internal_client_id: str = "keycloak-user-storage"
 
+    keycloak_password_broker_enabled: bool = True
     keycloak_token_broker_client_id: str = "ms-auth-service-broker"
     keycloak_token_broker_client_secret: SecretStr | None = None
     keycloak_token_broker_scope: str = "openid ouros-identity"
