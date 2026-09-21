@@ -6,7 +6,7 @@ import pytest
 
 from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
-from app.schemas.auth import TokenLoginRequest
+from app.schemas.auth import TokenLoginRequest, TokenRefreshRequest
 from app.services.keycloak_token_broker import (
     REQUIRED_FIRST_PARTY_AUDIENCES,
     KeycloakTokenBroker,
@@ -28,6 +28,42 @@ def make_settings(**overrides) -> Settings:
 def make_request() -> TokenLoginRequest:
     """Return one valid first-party password-login request."""
     return TokenLoginRequest(email="user@example.com", password="Senha123!")
+
+
+def test_refresh_broker_rotates_valid_keycloak_token() -> None:
+    """Use the confidential broker secret to rotate a server-managed session."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/protocol/openid-connect/token")
+        assert b"grant_type=refresh_token" in request.content
+        assert b"refresh_token=old-refresh-token" in request.content
+        assert b"client_secret=broker-secret" in request.content
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "rotated-access-token",
+                "expires_in": 600,
+                "refresh_expires_in": 1800,
+                "refresh_token": "rotated-refresh-token",
+                "token_type": "Bearer",
+                "scope": "openid ouros-identity",
+            },
+        )
+
+    broker = KeycloakTokenBroker(
+        make_settings(),
+        transport=httpx.MockTransport(handler),
+    )
+    with patch.object(
+        broker,
+        "_validate_access_token_contract",
+        return_value={"sub": "subject"},
+    ):
+        response = asyncio.run(
+            broker.refresh_token(TokenRefreshRequest(refresh_token="old-refresh-token"))
+        )
+
+    assert response.access_token == "rotated-access-token"
+    assert response.refresh_token == "rotated-refresh-token"
 
 
 def test_password_broker_relays_valid_keycloak_token() -> None:
