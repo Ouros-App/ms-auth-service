@@ -9,6 +9,7 @@ from app.schemas.auth import (
     CredentialVerificationResponse,
     KeycloakTokenResponse,
     TokenLoginRequest,
+    TokenRefreshRequest,
 )
 from app.schemas.common import HealthResponse, ReadinessResponse
 from app.services.auth_service import AuthService
@@ -108,3 +109,16 @@ async def issue_keycloak_token(
     """Apply credential throttling and relay a Keycloak-minted user token."""
     await rate_limiter.check_credentials_attempt(request, payload.email)
     return await token_broker.issue_password_token(payload)
+
+
+@router.post(
+    "/v1/auth/token/refresh",
+    tags=["auth"],
+    summary="Refresh a Keycloak user token",
+)
+async def refresh_keycloak_token(
+    payload: TokenRefreshRequest,
+    token_broker: TokenBrokerDependency,
+) -> KeycloakTokenResponse:
+    """Rotate a server-managed refresh token through the confidential broker."""
+    return await token_broker.refresh_token(payload)
