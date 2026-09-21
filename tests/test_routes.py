@@ -48,9 +48,10 @@ class FakeAuthService:
 
 
 class FakeKeycloakTokenBroker:
-    """Return a deterministic Keycloak-issued token without network I/O."""
+    """Return deterministic Keycloak-issued tokens without network I/O."""
 
-    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+    @staticmethod
+    def _response() -> KeycloakTokenResponse:
         return KeycloakTokenResponse(
             access_token="keycloak-signed-access-token",
             expires_in=600,
@@ -60,11 +61,20 @@ class FakeKeycloakTokenBroker:
             scope="openid ouros-identity",
         )
 
+    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+        return self._response()
+
+    async def refresh_token(self, _request) -> KeycloakTokenResponse:
+        return self._response()
+
 
 class InvalidKeycloakTokenBroker:
     """Raise the same generic invalid-credential exception as Keycloak."""
 
     async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+        raise InvalidCredentialsError
+
+    async def refresh_token(self, _request) -> KeycloakTokenResponse:
         raise InvalidCredentialsError
 
 
@@ -73,6 +83,21 @@ class UnavailableKeycloakTokenBroker:
 
     async def issue_password_token(self, _request) -> KeycloakTokenResponse:
         raise KeycloakTokenBrokerUnavailable("unavailable")
+
+    async def refresh_token(self, _request) -> KeycloakTokenResponse:
+        raise KeycloakTokenBrokerUnavailable("unavailable")
+
+
+class _LegacyFakeKeycloakTokenBroker:
+    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
+        return KeycloakTokenResponse(
+            access_token="keycloak-signed-access-token",
+            expires_in=600,
+            refresh_expires_in=1800,
+            refresh_token="keycloak-signed-refresh-token",
+            token_type="Bearer",
+            scope="openid ouros-identity",
+        )
 
 
 class RejectingAuthService:
@@ -178,3 +203,28 @@ def test_token_login_returns_503_when_broker_is_unavailable() -> None:
         )
     assert response.status_code == 503
     assert response.json() == {"detail": "Autenticação temporariamente indisponível."}
+
+
+def test_token_refresh_relays_rotated_keycloak_tokens() -> None:
+    """Allow trusted backends to renew a user session without the password."""
+    with build_client() as client:
+        response = client.post(
+            "/v1/auth/token/refresh",
+            json={"refresh_token": "keycloak-signed-refresh-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["access_token"] == "keycloak-signed-access-token"
+    assert response.json()["refresh_token"] == "keycloak-signed-refresh-token"
+
+
+def test_token_refresh_returns_401_for_expired_refresh_token() -> None:
+    """Fail closed when Keycloak rejects an expired or revoked refresh token."""
+    with build_client(token_broker=InvalidKeycloakTokenBroker()) as client:
+        response = client.post(
+            "/v1/auth/token/refresh",
+            json={"refresh_token": "expired-refresh-token"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Credenciais inválidas."}
