@@ -59,6 +59,7 @@ def create_app(
         application.state.rate_limiter = resolved_rate_limiter
         application.state.service_token_verifier = resolved_service_token_verifier
         application.state.keycloak_token_broker = resolved_keycloak_token_broker
+        application.state.settings = resolved_settings
         try:
             yield
         finally:
