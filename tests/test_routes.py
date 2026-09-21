@@ -101,9 +101,14 @@ def build_client(
     ready: bool = True,
     rejecting: bool = False,
     token_broker=None,
+    password_broker_enabled: bool = True,
 ) -> TestClient:
     """Build an isolated app that never inherits CI Redis configuration."""
-    settings = Settings(database_url="postgresql://unused", redis_url=None)
+    settings = Settings(
+        database_url="postgresql://unused",
+        redis_url=None,
+        keycloak_password_broker_enabled=password_broker_enabled,
+    )
     database = FakeDatabase(ready=ready)
     auth_service = RejectingAuthService() if rejecting else FakeAuthService()
     token_broker = token_broker or FakeKeycloakTokenBroker()
@@ -204,6 +209,30 @@ def test_token_refresh_relays_rotated_keycloak_tokens() -> None:
     assert response.status_code == 200
     assert response.json()["access_token"] == "keycloak-signed-access-token"
     assert response.json()["refresh_token"] == "keycloak-signed-refresh-token"
+
+
+def test_token_login_is_hidden_after_password_broker_cutover() -> None:
+    """Prevent Direct Grant from bypassing the interactive OTP browser flow."""
+    with build_client(password_broker_enabled=False) as client:
+        response = client.post(
+            "/v1/auth/token",
+            json={"email": "user@example.com", "password": "Senha123!"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+
+
+def test_token_refresh_is_hidden_after_password_broker_cutover() -> None:
+    """Disable refresh for sessions created through the retired password broker."""
+    with build_client(password_broker_enabled=False) as client:
+        response = client.post(
+            "/v1/auth/token/refresh",
+            json={"refresh_token": "legacy-refresh-token"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
 
 
 def test_token_refresh_returns_401_for_expired_refresh_token() -> None:
