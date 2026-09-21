@@ -76,6 +76,19 @@ class TokenLoginRequest(BaseModel):
         return CredentialVerificationRequest.validate_password_length(value)
 
 
+class TokenRefreshRequest(BaseModel):
+    """Refresh token accepted only by trusted first-party backends."""
+
+    refresh_token: SecretStr
+
+    @field_validator("refresh_token")
+    @classmethod
+    def validate_refresh_token(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value():
+            raise ValueError("refresh_token cannot be empty")
+        return value
+
+
 class KeycloakTokenResponse(BaseModel):
     """A user token minted by Keycloak and relayed without modification."""
 
