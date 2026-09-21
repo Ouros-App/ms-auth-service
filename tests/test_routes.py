@@ -88,18 +88,6 @@ class UnavailableKeycloakTokenBroker:
         raise KeycloakTokenBrokerUnavailable("unavailable")
 
 
-class _LegacyFakeKeycloakTokenBroker:
-    async def issue_password_token(self, _request) -> KeycloakTokenResponse:
-        return KeycloakTokenResponse(
-            access_token="keycloak-signed-access-token",
-            expires_in=600,
-            refresh_expires_in=1800,
-            refresh_token="keycloak-signed-refresh-token",
-            token_type="Bearer",
-            scope="openid ouros-identity",
-        )
-
-
 class RejectingAuthService:
     """Reject all credentials using the production domain exception."""
 
