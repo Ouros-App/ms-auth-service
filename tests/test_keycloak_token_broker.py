@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
 from app.schemas.auth import TokenLoginRequest
 from app.services.keycloak_token_broker import (
+    REQUIRED_FIRST_PARTY_AUDIENCES,
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
 )
@@ -50,7 +52,12 @@ def test_password_broker_relays_valid_keycloak_token() -> None:
         make_settings(),
         transport=httpx.MockTransport(handler),
     )
-    response = asyncio.run(broker.issue_password_token(make_request()))
+    with patch.object(
+        broker,
+        "_validate_access_token_contract",
+        return_value={"sub": "subject"},
+    ):
+        response = asyncio.run(broker.issue_password_token(make_request()))
     assert response.access_token == "keycloak-access-token"
     assert response.token_type == "Bearer"
 
@@ -112,3 +119,261 @@ def test_password_broker_rejects_malformed_success_payload() -> None:
     )
     with pytest.raises(KeycloakTokenBrokerUnavailable):
         asyncio.run(broker.issue_password_token(make_request()))
+
+
+
+def test_broker_validates_full_ouros_token_contract() -> None:
+    """Require every first-party audience plus the signed business identity."""
+    broker = KeycloakTokenBroker(make_settings())
+    signing_key = Mock(key="public-key")
+    jwks = Mock()
+    jwks.get_signing_key_from_jwt.return_value = signing_key
+    audiences = [
+        "ms-spring-api",
+        "ms-telemetry-dashboard-service",
+        "ms-ai-server",
+        "ms-mcp-server-ouros-knowledge",
+        "ms-mcp-server-ouros-knowledge-codemode",
+    ]
+    claims = {
+        "sub": "keycloak-subject",
+        "azp": "ms-auth-service-broker",
+        "iss": "https://ouros-keycloak.discloud.app/realms/ouros",
+        "aud": audiences,
+        "iat": 1_700_000_000,
+        "exp": 4_102_444_800,
+        "database_id": 42,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=jwks,
+        ),
+        patch(
+            "app.services.keycloak_token_broker.decode",
+            return_value=claims,
+        ) as decoder,
+    ):
+        assert broker._validate_access_token_contract("signed-token") == claims
+
+    jwks.get_signing_key_from_jwt.assert_called_once_with("signed-token")
+    assert decoder.call_args.kwargs["algorithms"] == ["RS256"]
+    assert decoder.call_args.kwargs["issuer"] == (
+        "https://ouros-keycloak.discloud.app/realms/ouros"
+    )
+
+
+def test_broker_rejects_missing_resource_audience() -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "ms-auth-service-broker",
+        "aud": ["ms-ai-server"],
+        "database_id": 42,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {
+            "sub": "subject",
+        "azp": "ms-auth-service-broker",
+            "aud": [
+                "ms-spring-api",
+                "ms-telemetry-dashboard-service",
+                "ms-ai-server",
+                "ms-mcp-server-ouros-knowledge",
+                "ms-mcp-server-ouros-knowledge-codemode",
+            ],
+            "database_id": 0,
+            "account_type": "farm_owner",
+            "realm_access": {"roles": ["farm_owner"]},
+        },
+        {
+            "sub": "subject",
+        "azp": "ms-auth-service-broker",
+            "aud": [
+                "ms-spring-api",
+                "ms-telemetry-dashboard-service",
+                "ms-ai-server",
+                "ms-mcp-server-ouros-knowledge",
+                "ms-mcp-server-ouros-knowledge-codemode",
+            ],
+            "database_id": 42,
+            "account_type": "admin",
+            "realm_access": {"roles": ["farm_owner"]},
+        },
+    ],
+)
+def test_broker_rejects_invalid_signed_business_identity(claims: dict) -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
+
+
+
+def test_broker_rejects_wrong_authorized_party() -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "another-client",
+        "aud": [
+            "ms-spring-api",
+            "ms-telemetry-dashboard-service",
+            "ms-ai-server",
+            "ms-mcp-server-ouros-knowledge",
+            "ms-mcp-server-ouros-knowledge-codemode",
+        ],
+        "database_id": 42,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
+
+
+
+def test_broker_rejects_non_string_account_type() -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "ms-auth-service-broker",
+        "aud": [
+            "ms-spring-api",
+            "ms-telemetry-dashboard-service",
+            "ms-ai-server",
+            "ms-mcp-server-ouros-knowledge",
+            "ms-mcp-server-ouros-knowledge-codemode",
+        ],
+        "database_id": 42,
+        "account_type": [],
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
+
+
+def test_broker_rejects_invalid_audience_shape() -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "ms-auth-service-broker",
+        "aud": {"ms-ai-server": True},
+        "database_id": 42,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")
+
+
+def test_broker_accepts_numeric_database_id_encoded_as_string() -> None:
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "ms-auth-service-broker",
+        "aud": [
+            "ms-spring-api",
+            "ms-telemetry-dashboard-service",
+            "ms-ai-server",
+            "ms-mcp-server-ouros-knowledge",
+            "ms-mcp-server-ouros-knowledge-codemode",
+        ],
+        "database_id": "42",
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+    ):
+        assert broker._validate_access_token_contract("signed-token") == claims
+
+
+
+def test_broker_rejects_oversized_decimal_database_id() -> None:
+    """Map Python's oversized decimal conversion failure to broker unavailability."""
+    broker = KeycloakTokenBroker(make_settings())
+    claims = {
+        "sub": "subject",
+        "azp": "ms-auth-service-broker",
+        "aud": list(REQUIRED_FIRST_PARTY_AUDIENCES),
+        "database_id": "9" * 5000,
+        "account_type": "farm_owner",
+        "realm_access": {"roles": ["farm_owner"]},
+    }
+
+    with (
+        patch(
+            "app.services.keycloak_token_broker._get_jwks_client",
+            return_value=Mock(
+                get_signing_key_from_jwt=Mock(return_value=Mock(key="public-key"))
+            ),
+        ),
+        patch("app.services.keycloak_token_broker.decode", return_value=claims),
+        pytest.raises(KeycloakTokenBrokerUnavailable),
+    ):
+        broker._validate_access_token_contract("signed-token")

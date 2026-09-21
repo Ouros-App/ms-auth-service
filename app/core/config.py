@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     keycloak_token_broker_client_secret: SecretStr | None = None
     keycloak_token_broker_scope: str = "openid ouros-identity"
     keycloak_token_broker_timeout_seconds: float = Field(default=5.0, gt=0)
+    keycloak_token_broker_jwks_url: str | None = None
 
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":

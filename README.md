@@ -13,11 +13,11 @@
 
 Central authentication service for Ouros.
 
-## Current milestone: M3 bridge
+## Current milestone: Phase 3 token contract
 
-This service owns **credential verification against the production PostgreSQL identity tables** and exposes an authenticated internal bridge for the Keycloak User Storage provider. It still does not mint an Ouros JWT: Keycloak is the only issuer for the new user access and refresh tokens.
+This service owns **credential verification against the production PostgreSQL identity tables**, exposes the authenticated Keycloak User Storage bridge, and brokers first-party login tokens. It never mints an Ouros JWT: Keycloak remains the only issuer.
 
-The public M2 contract remains unchanged so the existing Spring/mobile authentication path keeps working during migration. M3 adds only internal endpoints used by Keycloak.
+Phase 3 adds a local verification gate to the official token broker: before `/v1/auth/token` returns an access token, the service validates its RS256 signature, issuer, required audiences, expiry and signed business identity.
 
 ### Supported identities
 
@@ -111,6 +111,8 @@ When `REDIS_URL` is configured, counters live in Redis and are shared across rep
 - Production should also use a dedicated PostgreSQL role with only `SELECT` permission on the three identity tables. Application-level read-only mode is defense in depth, not a replacement for DB grants.
 - The API does not log passwords and Pydantic represents the request password as `SecretStr`.
 - No JWT is generated locally in this service.
+- Tokens returned by `/v1/auth/token` are locally verified before leaving the service.
+- A broker token must contain every first-party audience and a valid `database_id` + `account_type` whose realm role matches.
 
 ## Keycloak User Storage bridge
 
@@ -262,7 +264,7 @@ Web backend / mobile / trusted Ouros client
   -> Keycloak-issued JWT returned to the caller
 ```
 
-The service does not create, modify or sign JWTs. Keycloak remains the sole issuer, and all APIs continue validating its issuer, JWKS signature, expiry, audience and roles.
+The service does not create, modify or sign JWTs. Keycloak remains the sole issuer. Before relaying a login response, `ms-auth-service` independently validates the access token against Keycloak JWKS and requires the complete Ouros first-party audience set plus signed business identity. Each resource server still validates its own audience independently.
 
 ### Endpoint contract
 
@@ -336,6 +338,7 @@ KEYCLOAK_TOKEN_BROKER_CLIENT_ID=ms-auth-service-broker
 KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET=<secret-from-keycloak>
 KEYCLOAK_TOKEN_BROKER_SCOPE=openid ouros-identity
 KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS=5
+KEYCLOAK_TOKEN_BROKER_JWKS_URL=
 ```
 
 `KEYCLOAK_TOKEN_BROKER_CLIENT_ID`, `KEYCLOAK_TOKEN_BROKER_SCOPE` and `KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS` have safe defaults. `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET` is required only for `/v1/auth/token`; without it, the legacy endpoints still work and the token endpoint returns `503`.
@@ -346,7 +349,7 @@ KEYCLOAK_TOKEN_BROKER_TIMEOUT_SECONDS=5
 2. Store the generated client secret in Infisical as `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET` for `ms-auth-service`.
 3. Merge and deploy the `ms-auth-service` token-broker change.
 4. Check `/ready` returns `200`.
-5. Use a QA account to call `/v1/auth/token`; validate the returned JWT locally and call one protected API with it.
+5. Use a QA account to call `/v1/auth/token`; the broker must reject any token missing a required audience or signed business claim, then use the accepted token against every protected first-party API.
 6. Verify invalid-password attempts return generic `401` and repeated attempts receive `429`.
 
 Never commit a client secret or an example production token.
