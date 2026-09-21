@@ -7,7 +7,11 @@ from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 from app.core.config import Settings
 from app.core.errors import InvalidCredentialsError
-from app.schemas.auth import KeycloakTokenResponse, TokenLoginRequest
+from app.schemas.auth import (
+    KeycloakTokenResponse,
+    TokenLoginRequest,
+    TokenRefreshRequest,
+)
 
 VALID_ACCOUNT_TYPES = {"farm_owner", "company_employee", "admin"}
 INVALID_DATABASE_ID_DETAIL = "invalid database_id claim"
@@ -128,22 +132,11 @@ class KeycloakTokenBroker:
         _positive_database_id(database_id)
         return claims
 
-    async def issue_password_token(
-        self,
-        credentials: TokenLoginRequest,
-    ) -> KeycloakTokenResponse:
-        """Request and locally verify a Keycloak-minted user token."""
+    async def _exchange_token(self, form: dict[str, str]) -> KeycloakTokenResponse:
+        """Exchange one OAuth grant and validate the returned access token."""
         if self._client_secret is None:
             raise KeycloakTokenBrokerUnavailable("broker client secret is not configured")
 
-        form = {
-            "grant_type": "password",
-            "client_id": self._client_id,
-            "client_secret": self._client_secret.get_secret_value(),
-            "username": credentials.email,
-            "password": credentials.password.get_secret_value(),
-            "scope": self._scope,
-        }
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout_seconds,
@@ -173,3 +166,39 @@ class KeycloakTokenBroker:
                 "Keycloak signing keys are unavailable"
             ) from exc
         return token_response
+
+    async def issue_password_token(
+        self,
+        credentials: TokenLoginRequest,
+    ) -> KeycloakTokenResponse:
+        """Request and locally verify a Keycloak-minted user token."""
+        if self._client_secret is None:
+            raise KeycloakTokenBrokerUnavailable("broker client secret is not configured")
+
+        return await self._exchange_token(
+            {
+                "grant_type": "password",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret.get_secret_value(),
+                "username": credentials.email,
+                "password": credentials.password.get_secret_value(),
+                "scope": self._scope,
+            }
+        )
+
+    async def refresh_token(
+        self,
+        payload: TokenRefreshRequest,
+    ) -> KeycloakTokenResponse:
+        """Rotate a Keycloak user session without receiving the user's password."""
+        if self._client_secret is None:
+            raise KeycloakTokenBrokerUnavailable("broker client secret is not configured")
+
+        return await self._exchange_token(
+            {
+                "grant_type": "refresh_token",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret.get_secret_value(),
+                "refresh_token": payload.refresh_token.get_secret_value(),
+            }
+        )
