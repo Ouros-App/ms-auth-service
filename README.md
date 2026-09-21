@@ -307,7 +307,20 @@ The token includes the federated identity claims issued by Keycloak, including `
 - **Public third-party integrations:** use Authorization Code + PKCE rather than the password broker.
 - The endpoint is for first-party Ouros applications. Do not embed the broker client secret in web or mobile applications.
 
-At present, token refresh must remain server-managed because the Keycloak broker client secret is intentionally unavailable to callers. A caller that cannot safely keep a refresh token should log in again when the access token expires.
+Token refresh is server-managed because the Keycloak broker client secret is intentionally unavailable to browsers and public clients. Trusted Ouros backends may call `POST /v1/auth/token/refresh` with a server-held refresh token; the service performs the confidential refresh grant, validates the rotated access token with the same Ouros contract, and relays the new token document.
+
+### Refresh
+
+```http
+POST /v1/auth/token/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "<server-held-refresh-token>"
+}
+```
+
+This endpoint is intended for trusted first-party backends/BFFs. Browsers should never receive or persist the refresh token in JavaScript-accessible storage. An expired or revoked refresh token returns a generic `401`; Keycloak/broker outages return `503`.
 
 ### Errors and rate limits
 
