@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.core.config import Settings
 from app.core.database import Database
 from app.core.rate_limit import RateLimiter
 from app.schemas.auth import (
@@ -28,6 +29,11 @@ def get_token_broker(request: Request) -> KeycloakTokenBroker:
     return request.app.state.keycloak_token_broker
 
 
+def get_runtime_settings(request: Request) -> Settings:
+    """Resolve immutable runtime settings from application state."""
+    return request.app.state.settings
+
+
 def get_database(request: Request) -> Database:
     """Resolve the shared database wrapper from application state."""
     return request.app.state.database
@@ -42,6 +48,13 @@ AuthServiceDependency = Annotated[AuthService, Depends(get_auth_service)]
 DatabaseDependency = Annotated[Database, Depends(get_database)]
 RateLimiterDependency = Annotated[RateLimiter, Depends(get_rate_limiter)]
 TokenBrokerDependency = Annotated[KeycloakTokenBroker, Depends(get_token_broker)]
+SettingsDependency = Annotated[Settings, Depends(get_runtime_settings)]
+
+
+def require_password_broker(settings: Settings) -> None:
+    """Hide the legacy password broker after the PKCE + OTP cutover."""
+    if not settings.keycloak_password_broker_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
 
 
 @router.get("/", tags=["meta"])
@@ -105,8 +118,10 @@ async def issue_keycloak_token(
     payload: TokenLoginRequest,
     rate_limiter: RateLimiterDependency,
     token_broker: TokenBrokerDependency,
+    settings: SettingsDependency,
 ) -> KeycloakTokenResponse:
     """Apply credential throttling and relay a Keycloak-minted user token."""
+    require_password_broker(settings)
     await rate_limiter.check_credentials_attempt(request, payload.email)
     return await token_broker.issue_password_token(payload)
 
@@ -119,6 +134,8 @@ async def issue_keycloak_token(
 async def refresh_keycloak_token(
     payload: TokenRefreshRequest,
     token_broker: TokenBrokerDependency,
+    settings: SettingsDependency,
 ) -> KeycloakTokenResponse:
     """Rotate a server-managed refresh token through the confidential broker."""
+    require_password_broker(settings)
     return await token_broker.refresh_token(payload)

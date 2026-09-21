@@ -59,6 +59,7 @@ def create_app(
         application.state.rate_limiter = resolved_rate_limiter
         application.state.service_token_verifier = resolved_service_token_verifier
         application.state.keycloak_token_broker = resolved_keycloak_token_broker
+        application.state.settings = resolved_settings
         try:
             yield
         finally:
@@ -74,6 +75,27 @@ def create_app(
         ),
         lifespan=lifespan,
     )
+
+
+    @application.middleware("http")
+    async def password_broker_cutover_guard(
+        request: Request,
+        call_next,
+    ):
+        """Hide legacy password-broker routes before request-body parsing."""
+        if (
+            not resolved_settings.keycloak_password_broker_enabled
+            and request.method == "POST"
+            and request.url.path in {
+                "/v1/auth/token",
+                "/v1/auth/token/refresh",
+            }
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"detail": "Not Found"},
+            )
+        return await call_next(request)
 
     @application.exception_handler(KeycloakTokenBrokerUnavailable)
     async def keycloak_token_broker_unavailable_handler(
