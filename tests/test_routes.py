@@ -235,6 +235,33 @@ def test_token_refresh_is_hidden_after_password_broker_cutover() -> None:
     assert response.json() == {"detail": "Not Found"}
 
 
+
+def test_disabled_token_login_hides_malformed_json() -> None:
+    """Return 404 before FastAPI parses a disabled legacy login body."""
+    with build_client(password_broker_enabled=False) as client:
+        response = client.post(
+            "/v1/auth/token",
+            content="{",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+
+
+def test_disabled_token_refresh_hides_malformed_json() -> None:
+    """Return 404 before FastAPI parses a disabled legacy refresh body."""
+    with build_client(password_broker_enabled=False) as client:
+        response = client.post(
+            "/v1/auth/token/refresh",
+            content="{",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+
+
 def test_token_refresh_returns_401_for_expired_refresh_token() -> None:
     """Fail closed when Keycloak rejects an expired or revoked refresh token."""
     with build_client(token_broker=InvalidKeycloakTokenBroker()) as client:
