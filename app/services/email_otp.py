@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formataddr
+from pathlib import Path
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -251,29 +252,199 @@ class EmailOtpService:
         for challenge_id in expired:
             self._memory.pop(challenge_id, None)
 
-    def _send_email(self, recipient: str, code: str) -> None:
-        if not self._smtp_host:
-            raise EmailOtpUnavailable("SMTP host is not configured")
+    def _build_email_message(self, recipient: str, code: str) -> EmailMessage:
+        """Build the branded multipart OTP email with an inline Ouros logo."""
+        ttl_minutes = max(self._ttl_seconds // 60, 1)
+        logo_path = Path(__file__).resolve().parents[1] / "assets" / "ouros-logo.png"
 
         message = EmailMessage()
-        message["Subject"] = "Seu código de acesso Ouros"
+        message["Subject"] = f"{code} é seu código de acesso Ouros"
         message["From"] = formataddr(
             (self._smtp_from_display_name, self._smtp_from)
         )
         message["To"] = recipient
         message.set_content(
-            "Use este código para concluir seu login no Ouros:\n\n"
+            "Seu código de acesso Ouros é:\n\n"
             f"{code}\n\n"
-            f"O código expira em {max(self._ttl_seconds // 60, 1)} minuto(s).\n"
-            "Se você não tentou entrar, ignore esta mensagem."
+            f"Ele expira em {ttl_minutes} minuto(s).\n"
+            "Nunca compartilhe este código. Se você não tentou entrar, "
+            "ignore esta mensagem."
         )
+
         message.add_alternative(
-            "<p>Use este código para concluir seu login no Ouros:</p>"
-            f"<p style=\"font-size:28px;font-weight:700;letter-spacing:.2em\">{code}</p>"
-            f"<p>O código expira em {max(self._ttl_seconds // 60, 1)} minuto(s).</p>"
-            "<p>Se você não tentou entrar, ignore esta mensagem.</p>",
+            f"""<!doctype html>
+<html lang="pt-BR">
+  <body style="margin:0;padding:0;background:#010B13;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+      Seu código Ouros é {code}. Ele expira em {ttl_minutes} minuto(s).
+    </div>
+
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+      border="0" style="width:100%;background:#010B13;margin:0;padding:0;">
+      <tr>
+        <td align="center" style="padding:40px 16px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+            border="0"
+            style="width:100%;max-width:600px;border-collapse:separate;">
+            <tr>
+              <td align="center" style="padding:0 0 28px 0;">
+                <img src="cid:ouros-logo" alt="Ouros" width="220"
+                  style="display:block;width:220px;max-width:80%;height:auto;border:0;">
+              </td>
+            </tr>
+
+            <tr>
+              <td style="background:#F2F5F7;border-radius:24px;overflow:hidden;">
+                <div style="height:6px;line-height:6px;background:#D8A23A;">&nbsp;</div>
+
+                <table role="presentation" width="100%" cellspacing="0"
+                  cellpadding="0" border="0" style="width:100%;">
+                  <tr>
+                    <td style="padding:44px 44px 18px 44px;">
+                      <div style="
+                        display:inline-block;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:12px;
+                        font-weight:600;
+                        letter-spacing:1.4px;
+                        text-transform:uppercase;
+                        color:#171438;
+                        background:#E9E6F2;
+                        border-radius:999px;
+                        padding:8px 12px;">
+                        Segurança de acesso
+                      </div>
+
+                      <h1 style="
+                        margin:22px 0 12px 0;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:30px;
+                        line-height:1.12;
+                        letter-spacing:-1.2px;
+                        font-weight:700;
+                        color:#010B13;">
+                        Confirme que é você
+                      </h1>
+
+                      <p style="
+                        margin:0;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:16px;
+                        line-height:1.65;
+                        color:#4B4A58;">
+                        Use o código abaixo para concluir seu acesso ao Ouros.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:12px 44px 18px 44px;">
+                      <table role="presentation" width="100%" cellspacing="0"
+                        cellpadding="0" border="0"
+                        style="width:100%;background:#171438;border-radius:18px;">
+                        <tr>
+                          <td align="center" style="padding:28px 18px 24px 18px;">
+                            <div style="
+                              font-family:Poppins,Arial,sans-serif;
+                              font-size:12px;
+                              line-height:1;
+                              font-weight:600;
+                              letter-spacing:1.8px;
+                              text-transform:uppercase;
+                              color:#D8A23A;
+                              margin-bottom:14px;">
+                              Seu código
+                            </div>
+
+                            <div style="
+                              font-family:'Courier New',Courier,monospace;
+                              font-size:40px;
+                              line-height:1;
+                              font-weight:700;
+                              letter-spacing:10px;
+                              color:#F2F5F7;
+                              white-space:nowrap;">
+                              {code}
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:4px 44px 42px 44px;">
+                      <p style="
+                        margin:0 0 18px 0;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:14px;
+                        line-height:1.6;
+                        color:#656372;">
+                        Este código expira em
+                        <strong style="color:#010B13;">{ttl_minutes} minuto(s)</strong>.
+                      </p>
+
+                      <table role="presentation" width="100%" cellspacing="0"
+                        cellpadding="0" border="0"
+                        style="width:100%;border-top:1px solid #D9DCE0;">
+                        <tr>
+                          <td style="padding-top:20px;">
+                            <p style="
+                              margin:0;
+                              font-family:Poppins,Arial,sans-serif;
+                              font-size:12px;
+                              line-height:1.6;
+                              color:#777582;">
+                              Nunca compartilhe este código. Se você não tentou
+                              entrar no Ouros, pode ignorar esta mensagem com segurança.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td align="center" style="padding:24px 20px 0 20px;">
+                <p style="
+                  margin:0;
+                  font-family:Poppins,Arial,sans-serif;
+                  font-size:12px;
+                  line-height:1.6;
+                  letter-spacing:.2px;
+                  color:#9B99AA;">
+                  Ouros &bull; acesso protegido
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>""",
             subtype="html",
         )
+
+        html_part = message.get_payload()[-1]
+        html_part.add_related(
+            logo_path.read_bytes(),
+            maintype="image",
+            subtype="png",
+            cid="<ouros-logo>",
+            filename="ouros-logo.png",
+            disposition="inline",
+        )
+        return message
+
+    def _send_email(self, recipient: str, code: str) -> None:
+        if not self._smtp_host:
+            raise EmailOtpUnavailable("SMTP host is not configured")
+
+        message = self._build_email_message(recipient, code)
 
         context = ssl.create_default_context()
         smtp_type = smtplib.SMTP_SSL if self._smtp_ssl else smtplib.SMTP
