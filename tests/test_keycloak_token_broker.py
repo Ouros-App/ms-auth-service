@@ -30,6 +30,12 @@ def make_request() -> TokenLoginRequest:
     return TokenLoginRequest(email="user@example.com", password="Senha123!")
 
 
+def test_broker_audiences_follow_delegated_mcp_boundary() -> None:
+    """Require the exchange requester audience and reject direct Knowledge MCP access."""
+    assert "ms-ai-server-mcp-exchange" in REQUIRED_FIRST_PARTY_AUDIENCES
+    assert "ms-mcp-server-ouros-knowledge" not in REQUIRED_FIRST_PARTY_AUDIENCES
+
+
 def test_refresh_broker_rotates_valid_keycloak_token() -> None:
     """Use the confidential broker secret to rotate a server-managed session."""
     def handler(request: httpx.Request) -> httpx.Response:
@@ -168,7 +174,7 @@ def test_broker_validates_full_ouros_token_contract() -> None:
         "ms-spring-api",
         "ms-telemetry-dashboard-service",
         "ms-ai-server",
-        "ms-mcp-server-ouros-knowledge",
+        "ms-ai-server-mcp-exchange",
         "ms-mcp-server-ouros-knowledge-codemode",
     ]
     claims = {
@@ -236,7 +242,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
                 "ms-spring-api",
                 "ms-telemetry-dashboard-service",
                 "ms-ai-server",
-                "ms-mcp-server-ouros-knowledge",
+                "ms-ai-server-mcp-exchange",
                 "ms-mcp-server-ouros-knowledge-codemode",
             ],
             "database_id": 0,
@@ -250,7 +256,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
                 "ms-spring-api",
                 "ms-telemetry-dashboard-service",
                 "ms-ai-server",
-                "ms-mcp-server-ouros-knowledge",
+                "ms-ai-server-mcp-exchange",
                 "ms-mcp-server-ouros-knowledge-codemode",
             ],
             "database_id": 42,
@@ -284,7 +290,7 @@ def test_broker_rejects_wrong_authorized_party() -> None:
             "ms-spring-api",
             "ms-telemetry-dashboard-service",
             "ms-ai-server",
-            "ms-mcp-server-ouros-knowledge",
+            "ms-ai-server-mcp-exchange",
             "ms-mcp-server-ouros-knowledge-codemode",
         ],
         "database_id": 42,
@@ -315,7 +321,7 @@ def test_broker_rejects_non_string_account_type() -> None:
             "ms-spring-api",
             "ms-telemetry-dashboard-service",
             "ms-ai-server",
-            "ms-mcp-server-ouros-knowledge",
+            "ms-ai-server-mcp-exchange",
             "ms-mcp-server-ouros-knowledge-codemode",
         ],
         "database_id": 42,
@@ -369,7 +375,7 @@ def test_broker_accepts_numeric_database_id_encoded_as_string() -> None:
             "ms-spring-api",
             "ms-telemetry-dashboard-service",
             "ms-ai-server",
-            "ms-mcp-server-ouros-knowledge",
+            "ms-ai-server-mcp-exchange",
             "ms-mcp-server-ouros-knowledge-codemode",
         ],
         "database_id": "42",
