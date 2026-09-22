@@ -358,7 +358,7 @@ def test_smtp_starttls_and_auth_send_message() -> None:
     assert smtp.starttls_calls == 1
     assert smtp.login_args == ("smtp-user", "smtp-password")
     assert len(smtp.sent) == 1
-    assert "123456" in smtp.sent[0].get_content()
+    assert "123456" in smtp.sent[0].as_string()
 
 
 def test_smtp_ssl_send_message() -> None:
