@@ -374,13 +374,20 @@ def test_branded_email_keeps_plain_text_fallback() -> None:
     service = EmailOtpService(make_settings())
 
     message = service._build_email_message("user@example.com", "246810")
-    raw_message = message.as_string()
+    plain_body = message.get_body(preferencelist=("plain",))
+    html_body = message.get_body(preferencelist=("html",))
 
-    assert "Seu código de acesso Ouros é:" in raw_message
-    assert "246810" in raw_message
-    assert "Confirme que é você" in raw_message
-    assert "Segurança de acesso" in raw_message
-    assert "Ouros &bull; acesso protegido" in raw_message
+    assert plain_body is not None
+    assert html_body is not None
+
+    plain = plain_body.get_content()
+    html = html_body.get_content()
+
+    assert "Seu código de acesso Ouros é:" in plain
+    assert "246810" in plain
+    assert "Confirme que é você" in html
+    assert "Segurança de acesso" in html
+    assert "Ouros &bull; acesso protegido" in html
 
 
 def test_smtp_ssl_send_message() -> None:
