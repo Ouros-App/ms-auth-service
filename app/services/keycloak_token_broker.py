@@ -20,7 +20,7 @@ REQUIRED_FIRST_PARTY_AUDIENCES = frozenset(
         "ms-spring-api",
         "ms-telemetry-dashboard-service",
         "ms-ai-server",
-        "ms-mcp-server-ouros-knowledge",
+        "ms-ai-server-mcp-exchange",
         "ms-mcp-server-ouros-knowledge-codemode",
     }
 )
