@@ -144,8 +144,8 @@ class EmailOtpService:
     def _code_digest(self, challenge_id: str, code: str) -> str:
         if self._hmac_secret is None:
             raise EmailOtpUnavailable("email OTP HMAC secret is not configured")
-        key = self._hmac_secret.get_secret_value().encode("utf-8")
-        payload = f"{challenge_id}:{code}".encode("utf-8")
+        key = self._hmac_secret.get_secret_value().encode()
+        payload = f"{challenge_id}:{code}".encode()
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
     async def _redis_client(self) -> Redis:
