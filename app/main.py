@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -21,6 +22,9 @@ from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
 from app.services.email_otp import EmailOtpService
+logger = logging.getLogger(__name__)
+
+
 from app.services.keycloak_token_broker import (
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
@@ -125,10 +129,15 @@ def create_app(
 
     @application.exception_handler(EmailOtpUnavailable)
     async def email_otp_unavailable_handler(
-        _request: Request,
-        _exception: EmailOtpUnavailable,
+        request: Request,
+        exception: EmailOtpUnavailable,
     ) -> JSONResponse:
-        """Hide SMTP, Redis and OTP configuration diagnostics."""
+        """Keep client errors generic while preserving safe server diagnostics."""
+        logger.warning(
+            "email_otp_unavailable path=%s reason=%s",
+            request.url.path,
+            str(exception),
+        )
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Verificação por e-mail temporariamente indisponível."},
