@@ -358,7 +358,29 @@ def test_smtp_starttls_and_auth_send_message() -> None:
     assert smtp.starttls_calls == 1
     assert smtp.login_args == ("smtp-user", "smtp-password")
     assert len(smtp.sent) == 1
-    assert "123456" in smtp.sent[0].as_string()
+    raw_message = smtp.sent[0].as_string()
+    assert "123456" in raw_message
+    assert "#D8A23A" in raw_message
+    assert "#171438" in raw_message
+    assert "#010B13" in raw_message
+    assert "#F2F5F7" in raw_message
+    assert "font-family:Poppins,Arial,sans-serif" in raw_message
+    assert "cid:ouros-logo" in raw_message
+    assert "Content-ID: <ouros-logo>" in raw_message
+    assert 'filename="ouros-logo.png"' in raw_message
+
+
+def test_branded_email_keeps_plain_text_fallback() -> None:
+    service = EmailOtpService(make_settings())
+
+    message = service._build_email_message("user@example.com", "246810")
+    raw_message = message.as_string()
+
+    assert "Seu código de acesso Ouros é:" in raw_message
+    assert "246810" in raw_message
+    assert "Confirme que é você" in raw_message
+    assert "Segurança de acesso" in raw_message
+    assert "Ouros &bull; acesso protegido" in raw_message
 
 
 def test_smtp_ssl_send_message() -> None:
