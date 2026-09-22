@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
-from app.core.errors import InvalidCredentialsError
+from types import SimpleNamespace
+
+from app.core.errors import EmailOtpInvalidError, InvalidCredentialsError
 from app.main import create_app
 from app.models.identity import AccountType
 from app.schemas.auth import (
@@ -68,6 +70,26 @@ class FakeKeycloakTokenBroker:
         return self._response()
 
 
+class FakeEmailOtpService:
+    """Deterministic native OTP service for route tests."""
+
+    async def start(self, email: str):
+        return SimpleNamespace(
+            challenge_id="challenge-012345678901234567890123",
+            expires_in=300,
+            masked_email="u***@example.com",
+            email=email,
+        )
+
+    async def verify(self, challenge_id: str, email: str, code: str) -> None:
+        if challenge_id != "challenge-012345678901234567890123" or code != "123456":
+            raise EmailOtpInvalidError
+        assert email == "user@example.com"
+
+    async def close(self) -> None:
+        return
+
+
 class InvalidKeycloakTokenBroker:
     """Raise the same generic invalid-credential exception as Keycloak."""
 
@@ -101,6 +123,7 @@ def build_client(
     ready: bool = True,
     rejecting: bool = False,
     token_broker=None,
+    email_otp_service=None,
     password_broker_enabled: bool = True,
 ) -> TestClient:
     """Build an isolated app that never inherits CI Redis configuration."""
@@ -112,11 +135,13 @@ def build_client(
     database = FakeDatabase(ready=ready)
     auth_service = RejectingAuthService() if rejecting else FakeAuthService()
     token_broker = token_broker or FakeKeycloakTokenBroker()
+    email_otp_service = email_otp_service or FakeEmailOtpService()
     app = create_app(
         settings=settings,
         database=database,  # type: ignore[arg-type]
         auth_service=auth_service,  # type: ignore[arg-type]
         keycloak_token_broker=token_broker,  # type: ignore[arg-type]
+        email_otp_service=email_otp_service,  # type: ignore[arg-type]
     )
     return TestClient(app)
 
@@ -156,6 +181,73 @@ def test_verify_credentials_returns_generic_401() -> None:
         )
     assert response.status_code == 401
     assert response.json() == {"detail": "Credenciais inválidas."}
+
+
+def test_native_login_sends_email_challenge_before_issuing_tokens() -> None:
+    with build_client() as client:
+        response = client.post(
+            "/v1/auth/login/start",
+            json={"email": "user@example.com", "password": "Senha123!"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "challenge_id": "challenge-012345678901234567890123",
+        "expires_in": 300,
+        "masked_email": "u***@example.com",
+    }
+
+
+def test_native_login_verifies_code_then_issues_keycloak_tokens() -> None:
+    with build_client() as client:
+        response = client.post(
+            "/v1/auth/login/verify",
+            json={
+                "challenge_id": "challenge-012345678901234567890123",
+                "email": "user@example.com",
+                "password": "Senha123!",
+                "code": "123456",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["access_token"] == "keycloak-signed-access-token"
+
+
+def test_native_login_rejects_invalid_email_code() -> None:
+    with build_client() as client:
+        response = client.post(
+            "/v1/auth/login/verify",
+            json={
+                "challenge_id": "challenge-012345678901234567890123",
+                "email": "user@example.com",
+                "password": "Senha123!",
+                "code": "000000",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Código inválido ou expirado."}
+
+
+def test_native_login_survives_legacy_direct_login_cutover() -> None:
+    with build_client(password_broker_enabled=False) as client:
+        start = client.post(
+            "/v1/auth/login/start",
+            json={"email": "user@example.com", "password": "Senha123!"},
+        )
+        verify = client.post(
+            "/v1/auth/login/verify",
+            json={
+                "challenge_id": "challenge-012345678901234567890123",
+                "email": "user@example.com",
+                "password": "Senha123!",
+                "code": "123456",
+            },
+        )
+
+    assert start.status_code == 200
+    assert verify.status_code == 200
 
 
 def test_token_login_relays_a_keycloak_token() -> None:
@@ -223,16 +315,16 @@ def test_token_login_is_hidden_after_password_broker_cutover() -> None:
     assert response.json() == {"detail": "Not Found"}
 
 
-def test_token_refresh_is_hidden_after_password_broker_cutover() -> None:
-    """Disable refresh for sessions created through the retired password broker."""
+def test_token_refresh_remains_available_after_direct_login_cutover() -> None:
+    """Silent refresh must not force users through password + OTP again."""
     with build_client(password_broker_enabled=False) as client:
         response = client.post(
             "/v1/auth/token/refresh",
-            json={"refresh_token": "legacy-refresh-token"},
+            json={"refresh_token": "keycloak-signed-refresh-token"},
         )
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Not Found"}
+    assert response.status_code == 200
+    assert response.json()["access_token"] == "keycloak-signed-access-token"
 
 
 
@@ -249,8 +341,8 @@ def test_disabled_token_login_hides_malformed_json() -> None:
     assert response.json() == {"detail": "Not Found"}
 
 
-def test_disabled_token_refresh_hides_malformed_json() -> None:
-    """Return 404 before FastAPI parses a disabled legacy refresh body."""
+def test_disabled_direct_login_does_not_hide_refresh_validation() -> None:
+    """Refresh stays public to the app, so malformed payloads are still validated."""
     with build_client(password_broker_enabled=False) as client:
         response = client.post(
             "/v1/auth/token/refresh",
@@ -258,8 +350,7 @@ def test_disabled_token_refresh_hides_malformed_json() -> None:
             headers={"content-type": "application/json"},
         )
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Not Found"}
+    assert response.status_code == 422
 
 
 def test_token_refresh_returns_401_for_expired_refresh_token() -> None:
