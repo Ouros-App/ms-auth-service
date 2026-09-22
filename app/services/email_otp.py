@@ -17,7 +17,6 @@ from redis.exceptions import RedisError
 from app.core.config import Settings
 from app.core.errors import EmailOtpInvalidError, EmailOtpUnavailable
 
-
 logger = logging.getLogger(__name__)
 
 
