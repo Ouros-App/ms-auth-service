@@ -1,0 +1,17 @@
+name: Ruff import debug
+
+on:
+  push:
+    branches:
+      - fix/otp-safe-diagnostics
+
+jobs:
+  ruff-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.16.8
+      - run: ruff check app/main.py app/services/email_otp.py --select I001 --fix --diff
