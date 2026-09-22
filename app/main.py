@@ -22,13 +22,13 @@ from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
 from app.services.email_otp import EmailOtpService
-logger = logging.getLogger(__name__)
-
-
 from app.services.keycloak_token_broker import (
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
