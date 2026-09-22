@@ -76,6 +76,21 @@ class TokenLoginRequest(BaseModel):
         return CredentialVerificationRequest.validate_password_length(value)
 
 
+class NativeLoginStartResponse(BaseModel):
+    """Opaque email challenge returned after the password has been verified."""
+
+    challenge_id: str = Field(min_length=20, max_length=256)
+    expires_in: int = Field(gt=0)
+    masked_email: str = Field(min_length=3, max_length=255)
+
+
+class NativeLoginVerifyRequest(TokenLoginRequest):
+    """Second step of native first-party login."""
+
+    challenge_id: str = Field(min_length=20, max_length=256)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class TokenRefreshRequest(BaseModel):
     """Refresh token accepted only by trusted first-party backends."""
 
