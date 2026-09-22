@@ -120,7 +120,6 @@ async def verify_credentials(
 @router.post(
     "/v1/auth/login/start",
     tags=["auth"],
-    response_model=NativeLoginStartResponse,
     summary="Start native Ouros login and send an email code",
 )
 async def start_native_login(
@@ -149,7 +148,6 @@ async def start_native_login(
 @router.post(
     "/v1/auth/login/verify",
     tags=["auth"],
-    response_model=KeycloakTokenResponse,
     summary="Verify email code and receive Keycloak tokens",
 )
 async def verify_native_login(
