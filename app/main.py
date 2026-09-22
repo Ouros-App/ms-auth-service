@@ -27,7 +27,6 @@ from app.services.keycloak_token_broker import (
     KeycloakTokenBrokerUnavailable,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
