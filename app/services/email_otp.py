@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import smtplib
 import ssl
@@ -15,6 +16,8 @@ from redis.exceptions import RedisError
 
 from app.core.config import Settings
 from app.core.errors import EmailOtpInvalidError, EmailOtpUnavailable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +82,14 @@ class EmailOtpService:
         try:
             await asyncio.to_thread(self._send_email, normalized_email, code)
         except (OSError, smtplib.SMTPException) as exc:
+            smtp_code = getattr(exc, "smtp_code", None)
+            errno = getattr(exc, "errno", None)
+            logger.warning(
+                "email_otp_delivery_failed error_type=%s smtp_code=%s errno=%s",
+                type(exc).__name__,
+                smtp_code,
+                errno,
+            )
             await self._delete(challenge_id)
             raise EmailOtpUnavailable("email delivery failed") from exc
 
