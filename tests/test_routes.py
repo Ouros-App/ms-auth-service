@@ -1,8 +1,8 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
-from types import SimpleNamespace
-
 from app.core.errors import EmailOtpInvalidError, InvalidCredentialsError
 from app.main import create_app
 from app.models.identity import AccountType
