@@ -9,11 +9,14 @@ from app.schemas.auth import (
     CredentialVerificationRequest,
     CredentialVerificationResponse,
     KeycloakTokenResponse,
+    NativeLoginStartResponse,
+    NativeLoginVerifyRequest,
     TokenLoginRequest,
     TokenRefreshRequest,
 )
 from app.schemas.common import HealthResponse, ReadinessResponse
 from app.services.auth_service import AuthService
+from app.services.email_otp import EmailOtpService
 from app.services.keycloak_token_broker import KeycloakTokenBroker
 
 router = APIRouter()
@@ -44,10 +47,16 @@ def get_rate_limiter(request: Request) -> RateLimiter:
     return request.app.state.rate_limiter
 
 
+def get_email_otp_service(request: Request) -> EmailOtpService:
+    """Resolve the shared native email-OTP service from application state."""
+    return request.app.state.email_otp_service
+
+
 AuthServiceDependency = Annotated[AuthService, Depends(get_auth_service)]
 DatabaseDependency = Annotated[Database, Depends(get_database)]
 RateLimiterDependency = Annotated[RateLimiter, Depends(get_rate_limiter)]
 TokenBrokerDependency = Annotated[KeycloakTokenBroker, Depends(get_token_broker)]
+EmailOtpDependency = Annotated[EmailOtpService, Depends(get_email_otp_service)]
 SettingsDependency = Annotated[Settings, Depends(get_runtime_settings)]
 
 
@@ -109,6 +118,51 @@ async def verify_credentials(
 
 
 @router.post(
+    "/v1/auth/login/start",
+    tags=["auth"],
+    summary="Start native Ouros login and send an email code",
+)
+async def start_native_login(
+    request: Request,
+    payload: TokenLoginRequest,
+    service: AuthServiceDependency,
+    rate_limiter: RateLimiterDependency,
+    email_otp: EmailOtpDependency,
+) -> NativeLoginStartResponse:
+    """Verify the password first, then create a short-lived email challenge."""
+    await rate_limiter.check_credentials_attempt(request, payload.email)
+    verified = await service.verify_credentials(
+        CredentialVerificationRequest(
+            email=payload.email,
+            password=payload.password,
+        )
+    )
+    challenge = await email_otp.start(verified.identity.email)
+    return NativeLoginStartResponse(
+        challenge_id=challenge.challenge_id,
+        expires_in=challenge.expires_in,
+        masked_email=challenge.masked_email,
+    )
+
+
+@router.post(
+    "/v1/auth/login/verify",
+    tags=["auth"],
+    summary="Verify email code and receive Keycloak tokens",
+)
+async def verify_native_login(
+    payload: NativeLoginVerifyRequest,
+    email_otp: EmailOtpDependency,
+    token_broker: TokenBrokerDependency,
+) -> KeycloakTokenResponse:
+    """Complete native login without exposing a Keycloak UI to the client."""
+    await email_otp.verify(payload.challenge_id, payload.email, payload.code)
+    return await token_broker.issue_password_token(
+        TokenLoginRequest(email=payload.email, password=payload.password)
+    )
+
+
+@router.post(
     "/v1/auth/token",
     tags=["auth"],
     summary="Log in and receive a Keycloak access token",
@@ -134,8 +188,6 @@ async def issue_keycloak_token(
 async def refresh_keycloak_token(
     payload: TokenRefreshRequest,
     token_broker: TokenBrokerDependency,
-    settings: SettingsDependency,
 ) -> KeycloakTokenResponse:
-    """Rotate a server-managed refresh token through the confidential broker."""
-    require_password_broker(settings)
+    """Rotate a long-lived first-party session without repeating email OTP."""
     return await token_broker.refresh_token(payload)

@@ -10,6 +10,8 @@ from app.core.config import Settings, get_settings
 from app.core.database import Database
 from app.core.errors import (
     AmbiguousIdentityError,
+    EmailOtpInvalidError,
+    EmailOtpUnavailable,
     InvalidCredentialsError,
     RateLimitExceeded,
 )
@@ -18,6 +20,7 @@ from app.core.rate_limit import RateLimiter
 from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.repositories.identity_repository import IdentityRepository
 from app.services.auth_service import AuthService
+from app.services.email_otp import EmailOtpService
 from app.services.keycloak_token_broker import (
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
@@ -31,6 +34,7 @@ def create_app(
     rate_limiter: RateLimiter | None = None,
     service_token_verifier: KeycloakServiceTokenVerifier | None = None,
     keycloak_token_broker: KeycloakTokenBroker | None = None,
+    email_otp_service: EmailOtpService | None = None,
 ) -> FastAPI:
     """Build the FastAPI application and wire its shared services."""
     if settings is None:
@@ -46,6 +50,7 @@ def create_app(
     resolved_keycloak_token_broker = keycloak_token_broker or KeycloakTokenBroker(
         resolved_settings
     )
+    resolved_email_otp_service = email_otp_service or EmailOtpService(resolved_settings)
     resolved_service_token_verifier = (
         service_token_verifier
         or KeycloakServiceTokenVerifier(resolved_settings)
@@ -59,10 +64,12 @@ def create_app(
         application.state.rate_limiter = resolved_rate_limiter
         application.state.service_token_verifier = resolved_service_token_verifier
         application.state.keycloak_token_broker = resolved_keycloak_token_broker
+        application.state.email_otp_service = resolved_email_otp_service
         application.state.settings = resolved_settings
         try:
             yield
         finally:
+            await resolved_email_otp_service.close()
             await resolved_rate_limiter.close()
             await resolved_database.close()
 
@@ -86,10 +93,7 @@ def create_app(
         if (
             not resolved_settings.keycloak_password_broker_enabled
             and request.method == "POST"
-            and request.url.path in {
-                "/v1/auth/token",
-                "/v1/auth/token/refresh",
-            }
+            and request.url.path == "/v1/auth/token"
         ):
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -106,6 +110,28 @@ def create_app(
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Autenticação temporariamente indisponível."},
+        )
+
+    @application.exception_handler(EmailOtpInvalidError)
+    async def email_otp_invalid_handler(
+        _request: Request,
+        _exception: EmailOtpInvalidError,
+    ) -> JSONResponse:
+        """Keep missing, expired and invalid codes indistinguishable."""
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Código inválido ou expirado."},
+        )
+
+    @application.exception_handler(EmailOtpUnavailable)
+    async def email_otp_unavailable_handler(
+        _request: Request,
+        _exception: EmailOtpUnavailable,
+    ) -> JSONResponse:
+        """Hide SMTP, Redis and OTP configuration diagnostics."""
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Verificação por e-mail temporariamente indisponível."},
         )
 
     @application.exception_handler(InvalidCredentialsError)
