@@ -27,6 +27,23 @@ DEPENDENCY_READY = Gauge(
     ("dependency",),
 )
 
+_KNOWN_METRIC_PATHS = {
+    "/",
+    "/health",
+    "/ready",
+    "/metrics",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/v1/auth/credentials/verify",
+    "/v1/auth/login/start",
+    "/v1/auth/login/verify",
+    "/v1/auth/token",
+    "/v1/auth/token/refresh",
+    "/internal/v1/identities/by-email",
+    "/internal/v1/credentials/verify",
+}
+
 _AUTH_OPERATIONS_BY_PATH = {
     ("POST", "/v1/auth/credentials/verify"): "credentials_verify",
     ("POST", "/v1/auth/login/start"): "login_start",
@@ -37,13 +54,15 @@ _AUTH_OPERATIONS_BY_PATH = {
 
 
 def metric_path(path: str) -> str:
-    """Normalize dynamic identifiers before they can become metric labels."""
-    path = re.sub(
-        r"^/internal/v1/identities/[^/]+/\d+$",
-        "/internal/v1/identities/{account_type}/{database_id}",
+    """Return only bounded route templates suitable for metric labels."""
+    if path in _KNOWN_METRIC_PATHS:
+        return path
+    if re.fullmatch(
+        r"/internal/v1/identities/[^/]+/\d+",
         path,
-    )
-    return path
+    ):
+        return "/internal/v1/identities/{account_type}/{database_id}"
+    return "{unknown}"
 
 
 def auth_operation(method: str, path: str) -> str | None:
