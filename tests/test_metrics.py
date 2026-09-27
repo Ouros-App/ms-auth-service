@@ -1,6 +1,5 @@
-from fastapi.testclient import TestClient
-
 import pytest
+from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.metrics import metric_path
