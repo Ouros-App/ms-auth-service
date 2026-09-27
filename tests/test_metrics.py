@@ -1,6 +1,10 @@
 from fastapi.testclient import TestClient
 
+import pytest
+
 from app.core.config import Settings
+from app.core.metrics import metric_path
+from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.main import create_app
 
 
@@ -69,3 +73,32 @@ def test_readiness_exports_dependency_state() -> None:
 
     assert b'auth_service_dependency_ready{dependency="postgresql"} 1.0' in metrics.content
     assert b'auth_service_dependency_ready{dependency="rate_limiter"} 1.0' in metrics.content
+
+
+def test_metric_path_bounds_unknown_paths() -> None:
+    assert metric_path("/health") == "/health"
+    assert metric_path(
+        "/internal/v1/identities/farm_owner/42"
+    ) == "/internal/v1/identities/{account_type}/{database_id}"
+    assert metric_path("/totally/random/attacker/value") == "{unknown}"
+
+
+def test_metrics_identity_settings_reject_blank_values() -> None:
+    with pytest.raises(ValueError, match="KEYCLOAK_METRICS_AUDIENCE"):
+        Settings(keycloak_metrics_audience="   ")
+
+    with pytest.raises(
+        ValueError,
+        match="METRICS_KEYCLOAK_AUTHORIZED_PARTY",
+    ):
+        Settings(metrics_keycloak_authorized_party="")
+
+
+def test_service_verifier_does_not_fallback_for_explicit_blank_identity() -> None:
+    settings = Settings()
+    with pytest.raises(ValueError, match="must not be blank"):
+        KeycloakServiceTokenVerifier(
+            settings,
+            audience="",
+            client_id="ouros-prometheus",
+        )
