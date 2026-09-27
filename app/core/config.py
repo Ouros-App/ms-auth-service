@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     def validate_pool_sizes(self) -> "Settings":
         if self.database_max_pool_size < self.database_min_pool_size:
             raise ValueError("DATABASE_MAX_POOL_SIZE must be >= DATABASE_MIN_POOL_SIZE")
+        if not self.keycloak_metrics_audience.strip():
+            raise ValueError("KEYCLOAK_METRICS_AUDIENCE must not be blank")
+        if not self.metrics_keycloak_authorized_party.strip():
+            raise ValueError(
+                "METRICS_KEYCLOAK_AUTHORIZED_PARTY must not be blank"
+            )
         if self.ouros_smtp_starttls and self.ouros_smtp_ssl:
             raise ValueError("OUROS_SMTP_STARTTLS and OUROS_SMTP_SSL cannot both be true")
         if self.ouros_email_otp_enabled:
