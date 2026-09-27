@@ -17,10 +17,16 @@ class KeycloakServiceTokenVerifier:
 
     _JWKS_REFRESH_COOLDOWN_SECONDS = 5
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        audience: str | None = None,
+        client_id: str | None = None,
+    ) -> None:
         self._issuer = settings.keycloak_issuer_url.rstrip("/")
-        self._audience = settings.keycloak_internal_audience
-        self._client_id = settings.keycloak_internal_client_id
+        self._audience = audience or settings.keycloak_internal_audience
+        self._client_id = client_id or settings.keycloak_internal_client_id
         self._jwk_client = PyJWKClient(
             f"{self._issuer}/protocol/openid-connect/certs",
             lifespan=300,
