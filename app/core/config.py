@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     keycloak_issuer_url: str = "https://ouros-keycloak.discloud.app/realms/ouros"
     keycloak_internal_audience: str = "ms-auth-service-internal"
     keycloak_internal_client_id: str = "keycloak-user-storage"
+    keycloak_metrics_audience: str = "ms-auth-service"
+    metrics_keycloak_authorized_party: str = "ouros-prometheus"
 
     keycloak_password_broker_enabled: bool = True
     keycloak_token_broker_client_id: str = "ms-auth-service-broker"
