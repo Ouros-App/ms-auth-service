@@ -8,3 +8,4 @@ PyJWT[crypto]==2.14.0
 python-dotenv==1.1.1
 redis==5.2.1
 uvicorn[standard]==0.34.0
+prometheus-client==0.21.1

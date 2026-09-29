@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,15 @@ from app.core.errors import (
     RateLimitExceeded,
 )
 from app.core.infisical import load_infisical_secrets
+from app.core.metrics import (
+    AUTH_OPERATIONS,
+    HTTP_DURATION,
+    HTTP_REQUESTS,
+    RATE_LIMIT_HITS,
+    auth_operation,
+    metric_path,
+    outcome_for_status,
+)
 from app.core.rate_limit import RateLimiter
 from app.core.service_auth import KeycloakServiceTokenVerifier
 from app.repositories.identity_repository import IdentityRepository
@@ -36,6 +46,7 @@ def create_app(
     auth_service: AuthService | None = None,
     rate_limiter: RateLimiter | None = None,
     service_token_verifier: KeycloakServiceTokenVerifier | None = None,
+    metrics_token_verifier: KeycloakServiceTokenVerifier | None = None,
     keycloak_token_broker: KeycloakTokenBroker | None = None,
     email_otp_service: EmailOtpService | None = None,
 ) -> FastAPI:
@@ -58,6 +69,14 @@ def create_app(
         service_token_verifier
         or KeycloakServiceTokenVerifier(resolved_settings)
     )
+    resolved_metrics_token_verifier = (
+        metrics_token_verifier
+        or KeycloakServiceTokenVerifier(
+            resolved_settings,
+            audience=resolved_settings.keycloak_metrics_audience,
+            client_id=resolved_settings.metrics_keycloak_authorized_party,
+        )
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -66,6 +85,7 @@ def create_app(
         application.state.auth_service = resolved_auth_service
         application.state.rate_limiter = resolved_rate_limiter
         application.state.service_token_verifier = resolved_service_token_verifier
+        application.state.metrics_token_verifier = resolved_metrics_token_verifier
         application.state.keycloak_token_broker = resolved_keycloak_token_broker
         application.state.email_otp_service = resolved_email_otp_service
         application.state.settings = resolved_settings
@@ -103,6 +123,36 @@ def create_app(
                 content={"detail": "Not Found"},
             )
         return await call_next(request)
+
+    @application.middleware("http")
+    async def prometheus_request_metrics(
+        request: Request,
+        call_next,
+    ):
+        """Record bounded HTTP and auth-operation telemetry."""
+        started = time.perf_counter()
+        route = metric_path(request.url.path)
+        response_status = status.HTTP_500_INTERNAL_SERVER_ERROR
+        try:
+            response = await call_next(request)
+            response_status = response.status_code
+            return response
+        finally:
+            duration_seconds = time.perf_counter() - started
+            HTTP_REQUESTS.labels(
+                request.method,
+                route,
+                str(response_status),
+            ).inc()
+            HTTP_DURATION.labels(request.method, route).observe(
+                duration_seconds
+            )
+            operation = auth_operation(request.method, route)
+            if operation is not None:
+                AUTH_OPERATIONS.labels(
+                    operation,
+                    outcome_for_status(response_status),
+                ).inc()
 
     @application.exception_handler(KeycloakTokenBrokerUnavailable)
     async def keycloak_token_broker_unavailable_handler(
@@ -175,6 +225,7 @@ def create_app(
         exception: RateLimitExceeded,
     ) -> JSONResponse:
         """Return a standards-friendly retry hint for throttled login attempts."""
+        RATE_LIMIT_HITS.inc()
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Muitas tentativas. Tente novamente mais tarde."},

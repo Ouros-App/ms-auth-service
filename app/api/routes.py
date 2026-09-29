@@ -1,10 +1,16 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from app.core.config import Settings
 from app.core.database import Database
+from app.core.metrics import DEPENDENCY_READY, metrics_payload
 from app.core.rate_limit import RateLimiter
+from app.core.service_auth import (
+    KeycloakServiceTokenVerifier,
+    ServiceAuthenticationError,
+)
 from app.schemas.auth import (
     CredentialVerificationRequest,
     CredentialVerificationResponse,
@@ -47,6 +53,11 @@ def get_rate_limiter(request: Request) -> RateLimiter:
     return request.app.state.rate_limiter
 
 
+def get_metrics_token_verifier(request: Request) -> KeycloakServiceTokenVerifier:
+    """Resolve the dedicated Prometheus service-token verifier."""
+    return request.app.state.metrics_token_verifier
+
+
 def get_email_otp_service(request: Request) -> EmailOtpService:
     """Resolve the shared native email-OTP service from application state."""
     return request.app.state.email_otp_service
@@ -58,6 +69,30 @@ RateLimiterDependency = Annotated[RateLimiter, Depends(get_rate_limiter)]
 TokenBrokerDependency = Annotated[KeycloakTokenBroker, Depends(get_token_broker)]
 EmailOtpDependency = Annotated[EmailOtpService, Depends(get_email_otp_service)]
 SettingsDependency = Annotated[Settings, Depends(get_runtime_settings)]
+MetricsTokenVerifierDependency = Annotated[
+    KeycloakServiceTokenVerifier,
+    Depends(get_metrics_token_verifier),
+]
+
+
+async def require_metrics_bearer(
+    request: Request,
+    verifier: MetricsTokenVerifierDependency,
+) -> None:
+    """Allow only the dedicated ouros-prometheus service account."""
+    try:
+        await verifier.verify_authorization_header(
+            request.headers.get("Authorization")
+        )
+    except ServiceAuthenticationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid metrics credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
+MetricsAuthDependency = Annotated[None, Depends(require_metrics_bearer)]
 
 
 def require_password_broker(settings: Settings) -> None:
@@ -82,18 +117,33 @@ async def health() -> HealthResponse:
     return HealthResponse()
 
 
+@router.get("/metrics", include_in_schema=False)
+async def metrics(_auth: MetricsAuthDependency) -> Response:
+    """Expose Prometheus metrics only to the managed scraper identity."""
+    return Response(
+        content=metrics_payload(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
 @router.get("/ready", tags=["health"])
 async def ready(
     database: DatabaseDependency,
     rate_limiter: RateLimiterDependency,
 ) -> ReadinessResponse:
     """Return readiness only when required production dependencies are usable."""
-    if not await database.ping():
+    database_ready = await database.ping()
+    rate_limiter_ready = await rate_limiter.ping()
+    DEPENDENCY_READY.labels("postgresql").set(1 if database_ready else 0)
+    DEPENDENCY_READY.labels("rate_limiter").set(
+        1 if rate_limiter_ready else 0
+    )
+    if not database_ready:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database is not ready.",
         )
-    if not await rate_limiter.ping():
+    if not rate_limiter_ready:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Rate limiter is not ready.",
