@@ -262,7 +262,6 @@ async def refresh_keycloak_token(
     "/v1/auth/password/reset/start",
     tags=["auth"],
     summary="Start password reset flow and send email code",
-    response_model=PasswordResetStartResponse,
 )
 async def start_password_reset(
     request: Request,
@@ -279,7 +278,6 @@ async def start_password_reset(
     "/v1/auth/password/reset/verify",
     tags=["auth"],
     summary="Verify password reset OTP code and receive ephemeral reset token",
-    response_model=PasswordResetVerifyResponse,
 )
 async def verify_password_reset(
     payload: PasswordResetVerifyRequest,
@@ -293,7 +291,6 @@ async def verify_password_reset(
     "/v1/auth/password/reset/confirm",
     tags=["auth"],
     summary="Confirm new password and update via Spring API",
-    response_model=PasswordResetConfirmResponse,
 )
 async def confirm_password_reset(
     payload: PasswordResetConfirmRequest,

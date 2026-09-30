@@ -491,22 +491,19 @@ def test_password_reset_otp_wrong_code_and_attempts_exceeded() -> None:
         )
 
     for _ in range(4):
+        coro = service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "000000")
         with pytest.raises(PasswordResetOtpInvalidError):
-            asyncio.run(
-                service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "000000")
-            )
+            asyncio.run(coro)
 
     # 5th attempt triggers attempts exceeded
+    coro_5th = service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "000000")
     with pytest.raises(PasswordResetOtpAttemptsExceededError):
-        asyncio.run(
-            service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "000000")
-        )
+        asyncio.run(coro_5th)
 
     # Subsequent attempt rejected as invalid because challenge was deleted
+    coro_subsequent = service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "654321")
     with pytest.raises(PasswordResetOtpInvalidError):
-        asyncio.run(
-            service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "654321")
-        )
+        asyncio.run(coro_subsequent)
 
 
 def test_password_reset_branded_email_and_send() -> None:

@@ -2,6 +2,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
@@ -46,7 +47,20 @@ from app.services.password_reset_service import PasswordResetService
 logger = logging.getLogger(__name__)
 
 
-def create_app(
+@dataclass(slots=True)
+class AppDependencies:
+    settings: Settings
+    database: Database
+    auth_service: AuthService
+    rate_limiter: RateLimiter
+    service_token_verifier: KeycloakServiceTokenVerifier
+    metrics_token_verifier: KeycloakServiceTokenVerifier
+    keycloak_token_broker: KeycloakTokenBroker
+    email_otp_service: EmailOtpService
+    password_reset_service: PasswordResetService
+
+
+def _resolve_dependencies(
     settings: Settings | None = None,
     database: Database | None = None,
     auth_service: AuthService | None = None,
@@ -56,8 +70,7 @@ def create_app(
     keycloak_token_broker: KeycloakTokenBroker | None = None,
     email_otp_service: EmailOtpService | None = None,
     password_reset_service: PasswordResetService | None = None,
-) -> FastAPI:
-    """Build the FastAPI application and wire its shared services."""
+) -> AppDependencies:
     if settings is None:
         load_infisical_secrets()
         get_settings.cache_clear()
@@ -92,46 +105,81 @@ def create_app(
             client_id=resolved_settings.metrics_keycloak_authorized_party,
         )
     )
+    return AppDependencies(
+        settings=resolved_settings,
+        database=resolved_database,
+        auth_service=resolved_auth_service,
+        rate_limiter=resolved_rate_limiter,
+        service_token_verifier=resolved_service_token_verifier,
+        metrics_token_verifier=resolved_metrics_token_verifier,
+        keycloak_token_broker=resolved_keycloak_token_broker,
+        email_otp_service=resolved_email_otp_service,
+        password_reset_service=resolved_password_reset_service,
+    )
+
+
+def create_app(
+    settings: Settings | None = None,
+    database: Database | None = None,
+    auth_service: AuthService | None = None,
+    rate_limiter: RateLimiter | None = None,
+    service_token_verifier: KeycloakServiceTokenVerifier | None = None,
+    metrics_token_verifier: KeycloakServiceTokenVerifier | None = None,
+    keycloak_token_broker: KeycloakTokenBroker | None = None,
+    email_otp_service: EmailOtpService | None = None,
+    password_reset_service: PasswordResetService | None = None,
+) -> FastAPI:
+    """Build the FastAPI application and wire its shared services."""
+    deps = _resolve_dependencies(
+        settings=settings,
+        database=database,
+        auth_service=auth_service,
+        rate_limiter=rate_limiter,
+        service_token_verifier=service_token_verifier,
+        metrics_token_verifier=metrics_token_verifier,
+        keycloak_token_broker=keycloak_token_broker,
+        email_otp_service=email_otp_service,
+        password_reset_service=password_reset_service,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         """Expose dependencies without making liveness depend on their startup."""
-        application.state.database = resolved_database
-        application.state.auth_service = resolved_auth_service
-        application.state.rate_limiter = resolved_rate_limiter
-        application.state.service_token_verifier = resolved_service_token_verifier
-        application.state.metrics_token_verifier = resolved_metrics_token_verifier
-        application.state.keycloak_token_broker = resolved_keycloak_token_broker
-        application.state.email_otp_service = resolved_email_otp_service
-        application.state.password_reset_service = resolved_password_reset_service
-        application.state.settings = resolved_settings
+        application.state.database = deps.database
+        application.state.auth_service = deps.auth_service
+        application.state.rate_limiter = deps.rate_limiter
+        application.state.service_token_verifier = deps.service_token_verifier
+        application.state.metrics_token_verifier = deps.metrics_token_verifier
+        application.state.keycloak_token_broker = deps.keycloak_token_broker
+        application.state.email_otp_service = deps.email_otp_service
+        application.state.password_reset_service = deps.password_reset_service
+        application.state.settings = deps.settings
         try:
             yield
         finally:
-            await resolved_password_reset_service.close()
-            await resolved_email_otp_service.close()
-            await resolved_rate_limiter.close()
-            await resolved_database.close()
+            await deps.password_reset_service.close()
+            await deps.email_otp_service.close()
+            await deps.rate_limiter.close()
+            await deps.database.close()
 
     application = FastAPI(
         title="Ouros Auth Service",
-        version=resolved_settings.app_version,
+        version=deps.settings.app_version,
         description=(
             "Central credential verification service for Ouros. "
             "M3 adds an authenticated bridge for Keycloak User Storage."
         ),
         lifespan=lifespan,
     )
-    application.state.database = resolved_database
-    application.state.auth_service = resolved_auth_service
-    application.state.rate_limiter = resolved_rate_limiter
-    application.state.service_token_verifier = resolved_service_token_verifier
-    application.state.metrics_token_verifier = resolved_metrics_token_verifier
-    application.state.keycloak_token_broker = resolved_keycloak_token_broker
-    application.state.email_otp_service = resolved_email_otp_service
-    application.state.password_reset_service = resolved_password_reset_service
-    application.state.settings = resolved_settings
-
+    application.state.database = deps.database
+    application.state.auth_service = deps.auth_service
+    application.state.rate_limiter = deps.rate_limiter
+    application.state.service_token_verifier = deps.service_token_verifier
+    application.state.metrics_token_verifier = deps.metrics_token_verifier
+    application.state.keycloak_token_broker = deps.keycloak_token_broker
+    application.state.email_otp_service = deps.email_otp_service
+    application.state.password_reset_service = deps.password_reset_service
+    application.state.settings = deps.settings
 
     @application.middleware("http")
     async def password_broker_cutover_guard(
@@ -140,7 +188,7 @@ def create_app(
     ):
         """Hide legacy password-broker routes before request-body parsing."""
         if (
-            not resolved_settings.keycloak_password_broker_enabled
+            not deps.settings.keycloak_password_broker_enabled
             and request.method == "POST"
             and request.url.path == "/v1/auth/token"
         ):

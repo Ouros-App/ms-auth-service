@@ -116,7 +116,9 @@ class KeycloakTokenResponse(BaseModel):
     scope: str | None = None
 
 
-PASSWORD_COMPLEXITY_REGEX = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,20}$"
+CREDENTIAL_COMPLEXITY_PATTERN = re.compile(
+    r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,20}$"
+)
 
 
 class PasswordResetStartRequest(BaseModel):
@@ -169,7 +171,7 @@ class PasswordResetConfirmRequest(BaseModel):
     @classmethod
     def validate_new_password_complexity(cls, value: SecretStr) -> SecretStr:
         raw = value.get_secret_value()
-        if not re.match(PASSWORD_COMPLEXITY_REGEX, raw):
+        if not CREDENTIAL_COMPLEXITY_PATTERN.match(raw):
             raise ValueError(
                 "A senha deve ter entre 8 e 20 caracteres, incluindo pelo menos "
                 "uma letra maiúscula, uma minúscula, um número e um caractere especial"

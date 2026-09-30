@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import secrets
 import time
 import uuid
@@ -21,7 +20,7 @@ from app.core.security import burn_dummy_password_check
 from app.models.identity import AccountType
 from app.repositories.identity_repository import IdentityRepository
 from app.schemas.auth import (
-    PASSWORD_COMPLEXITY_REGEX,
+    CREDENTIAL_COMPLEXITY_PATTERN,
     PasswordResetConfirmRequest,
     PasswordResetConfirmResponse,
     PasswordResetStartRequest,
@@ -159,14 +158,14 @@ class PasswordResetService:
         request: PasswordResetConfirmRequest,
     ) -> PasswordResetConfirmResponse:
         """Validate reset token, password rules, and delegate update to ms-spring-api."""
-        claims = await self._verify_reset_token(request.reset_token)
+        claims = self._verify_reset_token(request.reset_token)
 
         jti = claims["jti"]
         if await self._is_blacklisted(jti):
             raise PasswordResetTokenInvalidError("Token já utilizado ou inválido.")
 
         raw_password = request.new_password.get_secret_value()
-        if not re.match(PASSWORD_COMPLEXITY_REGEX, raw_password):
+        if not CREDENTIAL_COMPLEXITY_PATTERN.match(raw_password):
             raise PasswordResetTokenInvalidError(
                 "A senha deve ter entre 8 e 20 caracteres, incluindo pelo menos "
                 "uma letra maiúscula, uma minúscula, um número e um caractere especial"
@@ -215,7 +214,7 @@ class PasswordResetService:
         }
         return jwt.encode(payload, self._get_reset_jwt_secret(), algorithm="HS256")
 
-    async def _verify_reset_token(self, token: str) -> dict[str, object]:
+    def _verify_reset_token(self, token: str) -> dict[str, object]:
         """Verify signature, expiry and claims of the reset token."""
         try:
             claims = jwt.decode(
