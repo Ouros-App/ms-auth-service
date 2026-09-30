@@ -16,7 +16,12 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import Settings
-from app.core.errors import EmailOtpInvalidError, EmailOtpUnavailable
+from app.core.errors import (
+    EmailOtpInvalidError,
+    EmailOtpUnavailable,
+    PasswordResetOtpAttemptsExceededError,
+    PasswordResetOtpInvalidError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,7 @@ class EmailOtpService:
     """Create and verify native email OTP challenges without storing passwords."""
 
     _KEY_PREFIX = "ouros:auth:email-otp:"
+    _KEY_PREFIX_RESET = "ouros:auth:password-reset-otp:"
     _REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
 
     def __init__(self, settings: Settings) -> None:
@@ -147,6 +153,118 @@ class EmailOtpService:
 
         await self._delete(challenge_id)
 
+    async def start_password_reset(
+        self,
+        email: str,
+        account_type: str,
+        database_id: int,
+    ) -> EmailOtpChallenge:
+        """Create one password reset challenge and send email with reset code."""
+        self._require_ready()
+
+        normalized_email = email.strip().lower()
+        challenge_id = secrets.token_urlsafe(32)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        expires_at = int(time.time()) + self._ttl_seconds
+        record: dict[str, object] = {
+            "email": normalized_email,
+            "account_type": account_type,
+            "database_id": database_id,
+            "code_digest": self._code_digest(challenge_id, code),
+            "attempts": 0,
+            "expires_at": expires_at,
+            "purpose": "password_reset",
+        }
+
+        await self._save(
+            challenge_id,
+            record,
+            self._ttl_seconds,
+            prefix=self._KEY_PREFIX_RESET,
+        )
+        try:
+            await asyncio.to_thread(
+                self._send_password_reset_email, normalized_email, code
+            )
+        except (OSError, smtplib.SMTPException) as exc:
+            smtp_code = getattr(exc, "smtp_code", None)
+            errno = getattr(exc, "errno", None)
+            logger.warning(
+                "password_reset_email_delivery_failed error_type=%s smtp_code=%s errno=%s",
+                type(exc).__name__,
+                smtp_code,
+                errno,
+            )
+            await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+            raise EmailOtpUnavailable("email delivery failed") from exc
+
+        return EmailOtpChallenge(
+            challenge_id=challenge_id,
+            expires_in=self._ttl_seconds,
+            masked_email=self._mask_email(normalized_email),
+        )
+
+    async def verify_password_reset(
+        self,
+        challenge_id: str,
+        email: str,
+        code: str,
+    ) -> dict[str, object]:
+        """Consume one password reset OTP challenge and return stored identity metadata."""
+        self._require_ready()
+
+        record = await self._load(challenge_id, prefix=self._KEY_PREFIX_RESET)
+        if record is None:
+            raise PasswordResetOtpInvalidError
+
+        normalized_email = email.strip().lower()
+        record_email = record.get("email")
+        expires_at = record.get("expires_at")
+        attempts = record.get("attempts")
+        code_digest = record.get("code_digest")
+        purpose = record.get("purpose")
+
+        if (
+            not isinstance(record_email, str)
+            or not isinstance(expires_at, int)
+            or not isinstance(attempts, int)
+            or not isinstance(code_digest, str)
+            or purpose != "password_reset"
+        ):
+            await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+            raise PasswordResetOtpInvalidError
+
+        now = int(time.time())
+        if expires_at <= now:
+            await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+            raise PasswordResetOtpInvalidError
+
+        if attempts >= self._max_attempts:
+            await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+            raise PasswordResetOtpAttemptsExceededError
+
+        submitted_digest = self._code_digest(challenge_id, code)
+        email_matches = hmac.compare_digest(record_email, normalized_email)
+        code_matches = hmac.compare_digest(code_digest, submitted_digest)
+
+        if not (email_matches and code_matches):
+            attempts += 1
+            if attempts >= self._max_attempts:
+                await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+                raise PasswordResetOtpAttemptsExceededError
+            else:
+                record["attempts"] = attempts
+                await self._save(
+                    challenge_id,
+                    record,
+                    max(expires_at - now, 1),
+                    prefix=self._KEY_PREFIX_RESET,
+                )
+                raise PasswordResetOtpInvalidError
+
+        await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+        return record
+
     def _require_ready(self) -> None:
         if not self._enabled:
             raise EmailOtpUnavailable("email OTP is disabled")
@@ -188,12 +306,15 @@ class EmailOtpService:
         challenge_id: str,
         record: dict[str, object],
         ttl_seconds: int,
+        prefix: str | None = None,
     ) -> None:
+        key_prefix = prefix or self._KEY_PREFIX
+        full_key = key_prefix + challenge_id
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
                 await client.set(
-                    self._KEY_PREFIX + challenge_id,
+                    full_key,
                     json.dumps(record, separators=(",", ":")),
                     ex=max(ttl_seconds, 1),
                 )
@@ -202,15 +323,26 @@ class EmailOtpService:
                 raise EmailOtpUnavailable("Redis write failed") from exc
             return
 
+        mem_key = (
+            challenge_id
+            if (prefix is None or prefix == self._KEY_PREFIX)
+            else f"reset:{challenge_id}"
+        )
         async with self._memory_lock:
             self._cleanup_memory()
-            self._memory[challenge_id] = dict(record)
+            self._memory[mem_key] = dict(record)
 
-    async def _load(self, challenge_id: str) -> dict[str, object] | None:
+    async def _load(
+        self,
+        challenge_id: str,
+        prefix: str | None = None,
+    ) -> dict[str, object] | None:
+        key_prefix = prefix or self._KEY_PREFIX
+        full_key = key_prefix + challenge_id
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
-                raw = await client.get(self._KEY_PREFIX + challenge_id)
+                raw = await client.get(full_key)
             except (RedisError, OSError) as exc:
                 await self.close()
                 raise EmailOtpUnavailable("Redis read failed") from exc
@@ -219,27 +351,43 @@ class EmailOtpService:
             try:
                 data = json.loads(raw)
             except (TypeError, json.JSONDecodeError):
-                await self._delete(challenge_id)
+                await self._delete(challenge_id, prefix=key_prefix)
                 return None
             return data if isinstance(data, dict) else None
 
+        mem_key = (
+            challenge_id
+            if (prefix is None or prefix == self._KEY_PREFIX)
+            else f"reset:{challenge_id}"
+        )
         async with self._memory_lock:
             self._cleanup_memory()
-            record = self._memory.get(challenge_id)
+            record = self._memory.get(mem_key)
             return dict(record) if record is not None else None
 
-    async def _delete(self, challenge_id: str) -> None:
+    async def _delete(
+        self,
+        challenge_id: str,
+        prefix: str | None = None,
+    ) -> None:
+        key_prefix = prefix or self._KEY_PREFIX
+        full_key = key_prefix + challenge_id
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
-                await client.delete(self._KEY_PREFIX + challenge_id)
+                await client.delete(full_key)
             except (RedisError, OSError) as exc:
                 await self.close()
                 raise EmailOtpUnavailable("Redis delete failed") from exc
             return
 
+        mem_key = (
+            challenge_id
+            if (prefix is None or prefix == self._KEY_PREFIX)
+            else f"reset:{challenge_id}"
+        )
         async with self._memory_lock:
-            self._memory.pop(challenge_id, None)
+            self._memory.pop(mem_key, None)
 
     def _cleanup_memory(self) -> None:
         now = int(time.time())
@@ -441,10 +589,16 @@ class EmailOtpService:
         return message
 
     def _send_email(self, recipient: str, code: str) -> None:
+        message = self._build_email_message(recipient, code)
+        self._dispatch_email(message)
+
+    def _send_password_reset_email(self, recipient: str, code: str) -> None:
+        message = self._build_password_reset_email_message(recipient, code)
+        self._dispatch_email(message)
+
+    def _dispatch_email(self, message: EmailMessage) -> None:
         if not self._smtp_host:
             raise EmailOtpUnavailable("SMTP host is not configured")
-
-        message = self._build_email_message(recipient, code)
 
         context = ssl.create_default_context()
         smtp_type = smtplib.SMTP_SSL if self._smtp_ssl else smtplib.SMTP
@@ -470,6 +624,196 @@ class EmailOtpService:
                     self._smtp_password.get_secret_value(),
                 )
             smtp.send_message(message)
+
+    def _build_password_reset_email_message(
+        self, recipient: str, code: str
+    ) -> EmailMessage:
+        """Build the branded multipart password reset OTP email with an inline Ouros logo."""
+        ttl_minutes = max(self._ttl_seconds // 60, 1)
+        logo_path = Path(__file__).resolve().parents[1] / "assets" / "ouros-logo.png"
+
+        message = EmailMessage()
+        message["Subject"] = f"{code} é seu código de recuperação de senha Ouros"
+        message["From"] = formataddr(
+            (self._smtp_from_display_name, self._smtp_from)
+        )
+        message["To"] = recipient
+        message.set_content(
+            "Seu código para recuperação de senha no Ouros é:\n\n"
+            f"{code}\n\n"
+            f"Ele expira em {ttl_minutes} minuto(s).\n\n"
+            "Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros, "
+            "desconsidere este e-mail. Sua senha atual permanecerá inalterada."
+        )
+
+        message.add_alternative(
+            f"""<!doctype html>
+<html lang="pt-BR">
+  <body style="margin:0;padding:0;background:#010B13;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+      Seu código de recuperação Ouros é {code}. Ele expira em {ttl_minutes} minuto(s).
+    </div>
+
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+      border="0" style="width:100%;background:#010B13;margin:0;padding:0;">
+      <tr>
+        <td align="center" style="padding:40px 16px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+            border="0"
+            style="width:100%;max-width:600px;border-collapse:separate;">
+            <tr>
+              <td align="center" style="padding:0 0 28px 0;">
+                <img src="cid:ouros-logo" alt="Ouros" width="220"
+                  style="display:block;width:220px;max-width:80%;height:auto;border:0;">
+              </td>
+            </tr>
+
+            <tr>
+              <td style="background:#F2F5F7;border-radius:24px;overflow:hidden;">
+                <div style="height:6px;line-height:6px;background:#D8A23A;">&nbsp;</div>
+
+                <table role="presentation" width="100%" cellspacing="0"
+                  cellpadding="0" border="0" style="width:100%;">
+                  <tr>
+                    <td style="padding:44px 44px 18px 44px;">
+                      <div style="
+                        display:inline-block;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:12px;
+                        font-weight:600;
+                        letter-spacing:1.4px;
+                        text-transform:uppercase;
+                        color:#171438;
+                        background:#E9E6F2;
+                        border-radius:999px;
+                        padding:8px 12px;">
+                        Recuperação de Senha
+                      </div>
+
+                      <h1 style="
+                        margin:22px 0 12px 0;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:30px;
+                        line-height:1.12;
+                        letter-spacing:-1.2px;
+                        font-weight:700;
+                        color:#010B13;">
+                        Redefina sua senha
+                      </h1>
+
+                      <p style="
+                        margin:0;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:16px;
+                        line-height:1.65;
+                        color:#4B4A58;">
+                        Recebemos uma solicitação para redefinir a senha da sua conta Ouros. Use o código de 6 dígitos abaixo para continuar.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:12px 44px 18px 44px;">
+                      <table role="presentation" width="100%" cellspacing="0"
+                        cellpadding="0" border="0"
+                        style="width:100%;background:#171438;border-radius:18px;">
+                        <tr>
+                          <td align="center" style="padding:28px 18px 24px 18px;">
+                            <div style="
+                              font-family:Poppins,Arial,sans-serif;
+                              font-size:12px;
+                              line-height:1;
+                              font-weight:600;
+                              letter-spacing:1.8px;
+                              text-transform:uppercase;
+                              color:#D8A23A;
+                              margin-bottom:14px;">
+                              Código de verificação
+                            </div>
+
+                            <div style="
+                              font-family:'Courier New',Courier,monospace;
+                              font-size:40px;
+                              line-height:1;
+                              font-weight:700;
+                              letter-spacing:10px;
+                              color:#F2F5F7;
+                              white-space:nowrap;">
+                              {code}
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:4px 44px 42px 44px;">
+                      <p style="
+                        margin:0 0 18px 0;
+                        font-family:Poppins,Arial,sans-serif;
+                        font-size:14px;
+                        line-height:1.6;
+                        color:#656372;">
+                        Este código expira em
+                        <strong style="color:#010B13;">{ttl_minutes} minuto(s)</strong>.
+                      </p>
+
+                      <table role="presentation" width="100%" cellspacing="0"
+                        cellpadding="0" border="0"
+                        style="width:100%;border-top:1px solid #D9DCE0;">
+                        <tr>
+                          <td style="padding-top:20px;">
+                            <p style="
+                              margin:0;
+                              font-family:Poppins,Arial,sans-serif;
+                              font-size:12px;
+                              line-height:1.6;
+                              color:#777582;">
+                              Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros,
+                              pode ignorar esta mensagem com total segurança. Sua senha atual permanecerá inalterada.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td align="center" style="padding:24px 20px 0 20px;">
+                <p style="
+                  margin:0;
+                  font-family:Poppins,Arial,sans-serif;
+                  font-size:12px;
+                  line-height:1.6;
+                  letter-spacing:.2px;
+                  color:#9B99AA;">
+                  Ouros &bull; segurança de acesso
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>""",
+            subtype="html",
+        )
+
+        html_part = message.get_payload()[-1]
+        html_part.add_related(
+            logo_path.read_bytes(),
+            maintype="image",
+            subtype="png",
+            cid="<ouros-logo>",
+            filename="ouros-logo.png",
+            disposition="inline",
+        )
+        return message
 
     @staticmethod
     def _mask_email(email: str) -> str:

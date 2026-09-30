@@ -15,6 +15,11 @@ from app.core.errors import (
     EmailOtpInvalidError,
     EmailOtpUnavailable,
     InvalidCredentialsError,
+    PasswordResetOtpAttemptsExceededError,
+    PasswordResetOtpInvalidError,
+    PasswordResetSpringError,
+    PasswordResetTokenInvalidError,
+    PasswordResetUnavailable,
     RateLimitExceeded,
 )
 from app.core.infisical import load_infisical_secrets
@@ -36,6 +41,7 @@ from app.services.keycloak_token_broker import (
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
 )
+from app.services.password_reset_service import PasswordResetService
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,7 @@ def create_app(
     metrics_token_verifier: KeycloakServiceTokenVerifier | None = None,
     keycloak_token_broker: KeycloakTokenBroker | None = None,
     email_otp_service: EmailOtpService | None = None,
+    password_reset_service: PasswordResetService | None = None,
 ) -> FastAPI:
     """Build the FastAPI application and wire its shared services."""
     if settings is None:
@@ -65,6 +72,14 @@ def create_app(
         resolved_settings
     )
     resolved_email_otp_service = email_otp_service or EmailOtpService(resolved_settings)
+    resolved_password_reset_service = (
+        password_reset_service
+        or PasswordResetService(
+            settings=resolved_settings,
+            identity_repository=IdentityRepository(resolved_database),
+            email_otp_service=resolved_email_otp_service,
+        )
+    )
     resolved_service_token_verifier = (
         service_token_verifier
         or KeycloakServiceTokenVerifier(resolved_settings)
@@ -88,10 +103,12 @@ def create_app(
         application.state.metrics_token_verifier = resolved_metrics_token_verifier
         application.state.keycloak_token_broker = resolved_keycloak_token_broker
         application.state.email_otp_service = resolved_email_otp_service
+        application.state.password_reset_service = resolved_password_reset_service
         application.state.settings = resolved_settings
         try:
             yield
         finally:
+            await resolved_password_reset_service.close()
             await resolved_email_otp_service.close()
             await resolved_rate_limiter.close()
             await resolved_database.close()
@@ -105,6 +122,15 @@ def create_app(
         ),
         lifespan=lifespan,
     )
+    application.state.database = resolved_database
+    application.state.auth_service = resolved_auth_service
+    application.state.rate_limiter = resolved_rate_limiter
+    application.state.service_token_verifier = resolved_service_token_verifier
+    application.state.metrics_token_verifier = resolved_metrics_token_verifier
+    application.state.keycloak_token_broker = resolved_keycloak_token_broker
+    application.state.email_otp_service = resolved_email_otp_service
+    application.state.password_reset_service = resolved_password_reset_service
+    application.state.settings = resolved_settings
 
 
     @application.middleware("http")
@@ -230,6 +256,57 @@ def create_app(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Muitas tentativas. Tente novamente mais tarde."},
             headers={"Retry-After": str(exception.retry_after)},
+        )
+
+    @application.exception_handler(PasswordResetOtpInvalidError)
+    async def password_reset_otp_invalid_handler(
+        _request: Request,
+        _exception: PasswordResetOtpInvalidError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": "Código inválido, incorreto ou expirado."},
+        )
+
+    @application.exception_handler(PasswordResetOtpAttemptsExceededError)
+    async def password_reset_otp_attempts_handler(
+        _request: Request,
+        _exception: PasswordResetOtpAttemptsExceededError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"detail": "Número máximo de tentativas de digitação do código excedido."},
+        )
+
+    @application.exception_handler(PasswordResetTokenInvalidError)
+    async def password_reset_token_invalid_handler(
+        _request: Request,
+        exception: PasswordResetTokenInvalidError,
+    ) -> JSONResponse:
+        detail = str(exception) if str(exception) else "Token de recuperação inválido ou expirado."
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": detail},
+        )
+
+    @application.exception_handler(PasswordResetSpringError)
+    async def password_reset_spring_error_handler(
+        _request: Request,
+        exception: PasswordResetSpringError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exception.status_code,
+            content={"detail": exception.detail},
+        )
+
+    @application.exception_handler(PasswordResetUnavailable)
+    async def password_reset_unavailable_handler(
+        _request: Request,
+        _exception: PasswordResetUnavailable,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Serviço de recuperação de senha temporariamente indisponível."},
         )
 
     application.include_router(router)

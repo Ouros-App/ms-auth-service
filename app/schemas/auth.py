@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
@@ -113,3 +114,70 @@ class KeycloakTokenResponse(BaseModel):
     refresh_token: str | None = None
     token_type: Literal["Bearer"]
     scope: str | None = None
+
+
+PASSWORD_COMPLEXITY_REGEX = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,20}$"
+
+
+class PasswordResetStartRequest(BaseModel):
+    """Initial request to start the password reset flow."""
+
+    email: str = Field(min_length=3, max_length=255)
+    account_type: AccountType | None = None
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_shape(cls, value: str) -> str:
+        return CredentialVerificationRequest.validate_email_shape(value)
+
+
+class PasswordResetStartResponse(BaseModel):
+    """Challenge returned after starting password reset."""
+
+    challenge_id: str = Field(min_length=20, max_length=256)
+    masked_email: str = Field(min_length=3, max_length=255)
+    expires_in: int = Field(gt=0)
+
+
+class PasswordResetVerifyRequest(BaseModel):
+    """Verification of the 6-digit OTP code received by email."""
+
+    challenge_id: str = Field(min_length=20, max_length=256)
+    email: str = Field(min_length=3, max_length=255)
+    code: str = Field(pattern=r"^\d{6}$")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_shape(cls, value: str) -> str:
+        return CredentialVerificationRequest.validate_email_shape(value)
+
+
+class PasswordResetVerifyResponse(BaseModel):
+    """Ephemeral reset token returned upon successful OTP verification."""
+
+    reset_token: str = Field(min_length=1)
+    expires_in: int = Field(gt=0)
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    """Final password reset confirmation request with the ephemeral token."""
+
+    reset_token: str = Field(min_length=1)
+    new_password: SecretStr
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password_complexity(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        if not re.match(PASSWORD_COMPLEXITY_REGEX, raw):
+            raise ValueError(
+                "A senha deve ter entre 8 e 20 caracteres, incluindo pelo menos "
+                "uma letra maiúscula, uma minúscula, um número e um caractere especial"
+            )
+        return value
+
+
+class PasswordResetConfirmResponse(BaseModel):
+    """Response returned after password has been successfully updated in Spring API."""
+
+    message: str = "Senha redefinida com sucesso."

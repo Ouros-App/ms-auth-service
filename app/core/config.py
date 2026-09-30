@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     ouros_smtp_password: SecretStr | None = None
     ouros_smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
 
+    ms_spring_api_url: str = "https://ms-spring-api.discloud.app"
+    ms_spring_api_timeout_seconds: float = Field(default=10.0, gt=0)
+    spring_jwt_secret: SecretStr | None = None
+    password_reset_jwt_secret: SecretStr | None = None
+    password_reset_token_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":
         if self.database_max_pool_size < self.database_min_pool_size:

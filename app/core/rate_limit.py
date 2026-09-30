@@ -157,6 +157,49 @@ return {current, ttl}
         if longest_retry_after > 0:
             raise RateLimitExceeded(retry_after=longest_retry_after)
 
+    async def check_password_reset_attempt(
+        self,
+        request: Request,
+        email: str,
+    ) -> None:
+        """Rate limit password reset start attempts by source IP and email (3/min IP, 5/15min email)."""
+        ip = self._client_ip(request)
+        dimensions = {
+            "ip": self._digest(ip),
+            "email": self._digest(email.strip().lower()),
+        }
+
+        rules = (
+            RateLimitRule(
+                name="password-reset-ip-minute",
+                limit=3,
+                window_seconds=60,
+                dimension="ip",
+            ),
+            RateLimitRule(
+                name="password-reset-email-15min",
+                limit=5,
+                window_seconds=15 * 60,
+                dimension="email",
+            ),
+        )
+
+        longest_retry_after = 0
+        for rule in rules:
+            key = (
+                "ouros:auth:rate-limit:"
+                f"{rule.name}:{dimensions[rule.dimension]}"
+            )
+            count, retry_after = await self._increment(
+                key,
+                rule.window_seconds,
+            )
+            if count > rule.limit:
+                longest_retry_after = max(longest_retry_after, retry_after)
+
+        if longest_retry_after > 0:
+            raise RateLimitExceeded(retry_after=longest_retry_after)
+
     async def _increment(self, key: str, window_seconds: int) -> tuple[int, int]:
         """Increment a Redis counter, falling back to memory if Redis is unavailable."""
         if self._redis_url is not None and self._redis is None:

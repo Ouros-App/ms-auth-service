@@ -40,6 +40,9 @@ _KNOWN_METRIC_PATHS = {
     "/v1/auth/login/verify",
     "/v1/auth/token",
     "/v1/auth/token/refresh",
+    "/v1/auth/password/reset/start",
+    "/v1/auth/password/reset/verify",
+    "/v1/auth/password/reset/confirm",
     "/internal/v1/identities/by-email",
     "/internal/v1/credentials/verify",
 }
@@ -50,6 +53,9 @@ _AUTH_OPERATIONS_BY_PATH = {
     ("POST", "/v1/auth/login/verify"): "login_verify",
     ("POST", "/v1/auth/token"): "token_issue",
     ("POST", "/v1/auth/token/refresh"): "token_refresh",
+    ("POST", "/v1/auth/password/reset/start"): "password_reset_start",
+    ("POST", "/v1/auth/password/reset/verify"): "password_reset_verify",
+    ("POST", "/v1/auth/password/reset/confirm"): "password_reset_confirm",
 }
 
 
