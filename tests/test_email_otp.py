@@ -531,3 +531,127 @@ def test_password_reset_branded_email_and_send() -> None:
         service._send_password_reset_email("user@example.com", "112233")
     assert len(smtp.sent) == 1
 
+
+
+def test_reset_otp_concurrent_valid_verifications_consume_once(reset_backend_url):
+    from app.core.errors import PasswordResetOtpInvalidError
+
+    async def run():
+        service = EmailOtpService(make_settings(redis_url=reset_backend_url))
+        with (
+            patch("app.services.email_otp.secrets.randbelow", return_value=123456),
+            patch.object(service, "_send_password_reset_email"),
+        ):
+            challenge = await service.start_password_reset("user@example.com", "farm_owner", 1)
+            await service._memory_lock.acquire()
+            tasks = [asyncio.create_task(service.verify_password_reset(
+                challenge.challenge_id, "user@example.com", "123456"
+            )) for _ in range(8)]
+            # Queue competing memory operations before permitting any read.
+            await asyncio.sleep(0)
+            service._memory_lock.release()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            await service.close()
+        assert sum(isinstance(result, dict) for result in results) == 1
+        assert sum(isinstance(result, PasswordResetOtpInvalidError) for result in results) == 7
+
+    asyncio.run(run())
+
+
+def test_reset_otp_concurrent_invalid_attempts_preserve_limit(reset_backend_url):
+    from app.core.errors import (
+        PasswordResetOtpAttemptsExceededError,
+        PasswordResetOtpInvalidError,
+    )
+
+    async def run():
+        service = EmailOtpService(make_settings(redis_url=reset_backend_url))
+        with (
+            patch("app.services.email_otp.secrets.randbelow", return_value=123456),
+            patch.object(service, "_send_password_reset_email"),
+        ):
+            challenge = await service.start_password_reset("user@example.com", "farm_owner", 1)
+            await service._memory_lock.acquire()
+            tasks = [asyncio.create_task(service.verify_password_reset(
+                challenge.challenge_id, "user@example.com", "000000"
+            )) for _ in range(4)]
+            await asyncio.sleep(0)
+            service._memory_lock.release()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            assert all(isinstance(result, PasswordResetOtpInvalidError) for result in results)
+            record = await service._load(challenge.challenge_id, prefix=service._KEY_PREFIX_RESET)
+            assert record["attempts"] == 4
+            if reset_backend_url is not None:
+                client = await service._redis_client()
+                assert 0 < await client.ttl(service._KEY_PREFIX_RESET + challenge.challenge_id) <= 300
+            with pytest.raises(PasswordResetOtpAttemptsExceededError):
+                await service.verify_password_reset(challenge.challenge_id, "user@example.com", "000000")
+            with pytest.raises(PasswordResetOtpInvalidError):
+                await service.verify_password_reset(challenge.challenge_id, "user@example.com", "123456")
+            await service.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("record_change", [
+    {"purpose": "login"}, {"expires_at": 0}, {"attempts": "bad"}, {"code_digest": None},
+])
+def test_reset_otp_rejects_expired_or_malformed_records(reset_backend_url, record_change):
+    from app.core.errors import PasswordResetOtpInvalidError
+
+    async def run():
+        service = EmailOtpService(make_settings(redis_url=reset_backend_url))
+        with patch.object(service, "_send_password_reset_email"):
+            challenge = await service.start_password_reset("user@example.com", "farm_owner", 1)
+            record = await service._load(challenge.challenge_id, prefix=service._KEY_PREFIX_RESET)
+            record.update(record_change)
+            await service._save(challenge.challenge_id, record, 300, prefix=service._KEY_PREFIX_RESET)
+            with pytest.raises(PasswordResetOtpInvalidError):
+                await service.verify_password_reset(challenge.challenge_id, "user@example.com", "123456")
+            assert await service._load(challenge.challenge_id, prefix=service._KEY_PREFIX_RESET) is None
+            await service.close()
+
+    asyncio.run(run())
+
+
+def test_reset_smtp_delivery_does_not_delay_start_response():
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def send(email, code):
+        entered.set()
+        release.wait(timeout=5)
+        finished.set()
+
+    async def run():
+        service = EmailOtpService(make_settings())
+        with patch.object(service, "_send_password_reset_email", side_effect=send):
+            try:
+                challenge = await asyncio.wait_for(
+                    service.start_password_reset("user@example.com", "farm_owner", 1), timeout=1
+                )
+                assert challenge.challenge_id
+                assert await asyncio.to_thread(entered.wait, 1)
+                assert not finished.is_set()
+            finally:
+                release.set()
+                await service.close()
+            assert finished.is_set()
+            assert not service._delivery_tasks
+
+    asyncio.run(run())
+
+
+def test_reset_background_delivery_failure_is_logged_and_challenge_removed(caplog):
+    async def run():
+        service = EmailOtpService(make_settings())
+        with patch.object(service, "_send_password_reset_email", side_effect=smtplib.SMTPException):
+            challenge = await service.start_password_reset("user@example.com", "farm_owner", 1)
+            await service.close()
+        assert await service._load(challenge.challenge_id, prefix=service._KEY_PREFIX_RESET) is None
+
+    asyncio.run(run())
+    assert "password_reset_email_delivery_failed" in caplog.text

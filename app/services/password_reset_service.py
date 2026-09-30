@@ -11,12 +11,11 @@ from redis.exceptions import RedisError
 
 from app.core.config import Settings
 from app.core.errors import (
-    AmbiguousIdentityError,
+    EmailOtpUnavailable,
     PasswordResetSpringError,
     PasswordResetTokenInvalidError,
     PasswordResetUnavailable,
 )
-from app.core.security import burn_dummy_password_check
 from app.models.identity import AccountType
 from app.repositories.identity_repository import IdentityRepository
 from app.schemas.auth import (
@@ -65,31 +64,28 @@ class PasswordResetService:
             await self._http_client.aclose()
 
     def _get_reset_jwt_secret(self) -> str:
-        secret = (
-            self._settings.password_reset_jwt_secret
-            or self._settings.ouros_email_otp_hmac_secret
-            or self._settings.spring_jwt_secret
-        )
-        if secret is not None:
-            return secret.get_secret_value()
-        return "ouros-dev-password-reset-secret-key-32-chars-minimum"
+        secret = self._settings.password_reset_jwt_secret
+        if secret is None or len(secret.get_secret_value()) < 32:
+            raise PasswordResetUnavailable("Password reset JWT secret is not configured securely")
+        return secret.get_secret_value()
 
     def _get_spring_jwt_secret(self) -> str:
-        secret = (
-            self._settings.spring_jwt_secret
-            or self._settings.password_reset_jwt_secret
-            or self._settings.ouros_email_otp_hmac_secret
-        )
-        if secret is not None:
-            return secret.get_secret_value()
-        return "ouros-dev-spring-delegation-secret-key-32-chars-minimum"
+        secret = self._settings.spring_jwt_secret
+        if secret is None or len(secret.get_secret_value()) < 32:
+            raise PasswordResetUnavailable("Spring JWT secret is not configured securely")
+        return secret.get_secret_value()
 
     async def start_reset(
         self,
         request: PasswordResetStartRequest,
     ) -> PasswordResetStartResponse:
-        """Start the password reset challenge or return a timing-equalized dummy response."""
+        """Return generic challenge metadata regardless of account eligibility or delivery."""
         normalized_email = request.email.strip().lower()
+        response = PasswordResetStartResponse(
+            challenge_id=secrets.token_urlsafe(32),
+            masked_email=EmailOtpService._mask_email(normalized_email),
+            expires_in=self._settings.ouros_email_otp_ttl_seconds,
+        )
 
         identities = await self._identity_repository.find_by_email(
             normalized_email,
@@ -102,30 +98,22 @@ class PasswordResetService:
             if i.account_type in (AccountType.FARM_OWNER, AccountType.COMPANY_EMPLOYEE)
         ]
 
-        if not valid_identities:
-            await asyncio.to_thread(burn_dummy_password_check, "dummy_timing_probe")
-            fake_challenge_id = secrets.token_urlsafe(32)
-            return PasswordResetStartResponse(
-                challenge_id=fake_challenge_id,
-                masked_email=EmailOtpService._mask_email(normalized_email),
-                expires_in=self._settings.ouros_email_otp_ttl_seconds,
-            )
-
-        if len(valid_identities) > 1:
-            raise AmbiguousIdentityError
+        if len(valid_identities) != 1:
+            return response
 
         identity = valid_identities[0]
-        challenge = await self._email_otp_service.start_password_reset(
-            identity.email,
-            identity.account_type.value,
-            identity.database_id,
-        )
+        try:
+            challenge = await self._email_otp_service.start_password_reset(
+                identity.email,
+                identity.account_type.value,
+                identity.database_id,
+            )
+        except EmailOtpUnavailable:
+            logger.warning("password_reset_challenge_unavailable")
+            return response
 
-        return PasswordResetStartResponse(
-            challenge_id=challenge.challenge_id,
-            masked_email=challenge.masked_email,
-            expires_in=challenge.expires_in,
-        )
+        response.challenge_id = challenge.challenge_id
+        return response
 
     async def verify_code(
         self,
@@ -161,11 +149,8 @@ class PasswordResetService:
         claims = self._verify_reset_token(request.reset_token)
 
         jti = claims["jti"]
-        if await self._is_blacklisted(jti):
-            raise PasswordResetTokenInvalidError("Token já utilizado ou inválido.")
-
         raw_password = request.new_password.get_secret_value()
-        if not CREDENTIAL_COMPLEXITY_PATTERN.match(raw_password):
+        if not CREDENTIAL_COMPLEXITY_PATTERN.fullmatch(raw_password):
             raise PasswordResetTokenInvalidError(
                 "A senha deve ter entre 8 e 20 caracteres, incluindo pelo menos "
                 "uma letra maiúscula, uma minúscula, um número e um caractere especial"
@@ -181,17 +166,20 @@ class PasswordResetService:
             database_id=database_id,
         )
 
-        await self._call_spring_patch(
-            account_type=account_type,
-            database_id=database_id,
-            new_password=raw_password,
-            delegation_jwt=delegation_jwt,
-        )
-
         now = int(time.time())
-        exp = int(claims.get("exp", now + self._settings.password_reset_token_ttl_seconds))
+        exp = int(claims["exp"])
         remaining_ttl = max(exp - now, 1)
-        await self._blacklist_token(jti, remaining_ttl)
+        await self._reserve_token(jti, remaining_ttl)
+        try:
+            await self._call_spring_patch(
+                account_type=account_type,
+                database_id=database_id,
+                new_password=raw_password,
+                delegation_jwt=delegation_jwt,
+            )
+        except Exception:
+            await self._release_token(jti)
+            raise
 
         return PasswordResetConfirmResponse(message="Senha redefinida com sucesso.")
 
@@ -311,10 +299,14 @@ class PasswordResetService:
 
         if response.status_code == 400:
             try:
-                detail = response.json().get("detail", "Dados da requisição inválidos na API de negócio.")
-            except (ValueError, TypeError, KeyError):
-                detail = "Dados da requisição inválidos na API de negócio."
-            raise PasswordResetSpringError(detail, status_code=400)
+                body = response.json()
+                detail = body.get("detail") if isinstance(body, dict) else None
+            except ValueError:
+                detail = None
+            logger.warning("password_reset_spring_bad_request detail=%r", detail)
+            raise PasswordResetSpringError(
+                "Dados da requisição inválidos na API de negócio.", status_code=400
+            )
 
         if response.status_code == 404:
             raise PasswordResetSpringError("Usuário não encontrado na API de negócio.", status_code=404)
@@ -350,42 +342,41 @@ class PasswordResetService:
             self._redis = client
             return client
 
-    async def _is_blacklisted(self, jti: str) -> bool:
-        """Check if reset token jti has already been used."""
+    async def _reserve_token(self, jti: str, ttl_seconds: int) -> None:
+        """Atomically reserve a token before updating the password."""
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
-                exists = await client.exists(self._BLACKLIST_PREFIX + jti)
-                return bool(exists)
-            except (RedisError, OSError) as exc:
-                await self.close()
-                raise PasswordResetUnavailable("Redis read failed") from exc
-
-        now = time.time()
-        async with self._blacklist_lock:
-            self._cleanup_blacklist_memory(now)
-            exp = self._blacklist_memory.get(jti)
-            return exp is not None and exp > now
-
-    async def _blacklist_token(self, jti: str, ttl_seconds: int) -> None:
-        """Record used reset token jti to prevent replay attacks."""
-        if self._redis_url is not None:
-            client = await self._redis_client()
-            try:
-                await client.set(
-                    self._BLACKLIST_PREFIX + jti,
-                    "1",
-                    ex=max(ttl_seconds, 1),
+                reserved = await client.set(
+                    self._BLACKLIST_PREFIX + jti, "1", nx=True, ex=max(ttl_seconds, 1)
                 )
             except (RedisError, OSError) as exc:
                 await self.close()
-                raise PasswordResetUnavailable("Redis write failed") from exc
+                raise PasswordResetUnavailable("Redis reservation failed") from exc
+            if not reserved:
+                raise PasswordResetTokenInvalidError("Token já utilizado ou inválido.")
             return
 
         now = time.time()
         async with self._blacklist_lock:
             self._cleanup_blacklist_memory(now)
+            if jti in self._blacklist_memory:
+                raise PasswordResetTokenInvalidError("Token já utilizado ou inválido.")
             self._blacklist_memory[jti] = now + ttl_seconds
+
+    async def _release_token(self, jti: str) -> None:
+        """Allow retry after a failed password update."""
+        if self._redis_url is not None:
+            client = await self._redis_client()
+            try:
+                await client.delete(self._BLACKLIST_PREFIX + jti)
+            except (RedisError, OSError) as exc:
+                await self.close()
+                raise PasswordResetUnavailable("Redis reservation release failed") from exc
+            return
+
+        async with self._blacklist_lock:
+            self._blacklist_memory.pop(jti, None)
 
     def _cleanup_blacklist_memory(self, now: float) -> None:
         expired = [
