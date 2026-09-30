@@ -453,3 +453,84 @@ def test_settings_reject_invalid_otp_and_smtp_combinations() -> None:
 def test_long_lived_mobile_sessions_request_offline_access() -> None:
     settings = Settings()
     assert "offline_access" in settings.keycloak_token_broker_scope.split()
+
+
+def test_password_reset_otp_round_trip() -> None:
+    service = EmailOtpService(make_settings())
+    with (
+        patch("app.services.email_otp.secrets.randbelow", return_value=123456),
+        patch.object(service, "_send_password_reset_email"),
+    ):
+        challenge = asyncio.run(
+            service.start_password_reset("Produtor@Fazenda.com", "farm_owner", 10)
+        )
+        record = asyncio.run(
+            service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "123456")
+        )
+
+    assert challenge.expires_in == 300
+    assert challenge.masked_email == "p***@fazenda.com"
+    assert record["account_type"] == "farm_owner"
+    assert record["database_id"] == 10
+    assert record["email"] == "produtor@fazenda.com"
+
+
+def test_password_reset_otp_wrong_code_and_attempts_exceeded() -> None:
+    from app.core.errors import (
+        PasswordResetOtpAttemptsExceededError,
+        PasswordResetOtpInvalidError,
+    )
+
+    service = EmailOtpService(make_settings())
+    with (
+        patch("app.services.email_otp.secrets.randbelow", return_value=654321),
+        patch.object(service, "_send_password_reset_email"),
+    ):
+        challenge = asyncio.run(
+            service.start_password_reset("produtor@fazenda.com", "farm_owner", 10)
+        )
+
+    for _ in range(4):
+        with pytest.raises(PasswordResetOtpInvalidError):
+            asyncio.run(
+                service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "000000")
+            )
+
+    # 5th attempt triggers attempts exceeded
+    with pytest.raises(PasswordResetOtpAttemptsExceededError):
+        asyncio.run(
+            service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "000000")
+        )
+
+    # Subsequent attempt rejected as invalid because challenge was deleted
+    with pytest.raises(PasswordResetOtpInvalidError):
+        asyncio.run(
+            service.verify_password_reset(challenge.challenge_id, "produtor@fazenda.com", "654321")
+        )
+
+
+def test_password_reset_branded_email_and_send() -> None:
+    smtp = FakeSmtp()
+    service = EmailOtpService(
+        make_settings(
+            ouros_smtp_auth=True,
+            ouros_smtp_starttls=True,
+            ouros_smtp_user="smtp-user",
+            ouros_smtp_password="smtp-password",
+        )
+    )
+
+    message = service._build_email_message("user@example.com", "112233", purpose="password_reset")
+    plain = message.get_body(preferencelist=("plain",)).get_content()
+    html = message.get_body(preferencelist=("html",)).get_content()
+
+    assert "recuperação de senha" in message["Subject"].lower()
+    assert "Seu código para recuperação de senha" in plain
+    assert "Redefina sua senha" in html
+    assert "Recuperação de Senha" in html
+    assert "Ouros &bull; segurança de acesso" in html
+
+    with patch("app.services.email_otp.smtplib.SMTP", return_value=smtp):
+        service._send_password_reset_email("user@example.com", "112233")
+    assert len(smtp.sent) == 1
+

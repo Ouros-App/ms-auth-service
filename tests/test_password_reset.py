@@ -1,8 +1,10 @@
 import asyncio
 import secrets
+import time
 from unittest.mock import patch
 
 import httpx
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -553,3 +555,209 @@ def test_api_route_confirm_password_reset_spring_error():
         },
     )
     assert resp.status_code == 502
+
+
+class FakeAsyncRedis:
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.data: dict[str, str] = {}
+        self.closed = False
+        self.fail = fail
+
+    async def ping(self) -> bool:
+        if self.fail == "ping":
+            from redis.exceptions import RedisError
+            raise RedisError("ping fail")
+        return True
+
+    async def exists(self, key: str) -> int:
+        if self.fail == "exists":
+            from redis.exceptions import RedisError
+            raise RedisError("exists fail")
+        return 1 if key in self.data else 0
+
+    async def set(self, key: str, value: str, *, ex: int) -> None:
+        if self.fail == "set":
+            from redis.exceptions import RedisError
+            raise RedisError("set fail")
+        self.data[key] = value
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_password_reset_service_close() -> None:
+    service = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    fake_redis = FakeAsyncRedis()
+    mock_http = httpx.AsyncClient()
+    service._redis = fake_redis
+    service._http_client = mock_http
+
+    asyncio.run(service.close())
+    assert fake_redis.closed
+    assert service._redis is None
+    assert mock_http.is_closed
+
+
+def test_password_reset_default_secrets() -> None:
+    cfg = Settings(
+        database_url="postgresql://unused",
+        password_reset_jwt_secret=None,
+        ouros_email_otp_hmac_secret=None,
+        spring_jwt_secret=None,
+    )
+    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert service._get_reset_jwt_secret() == "ouros-dev-password-reset-secret-key-32-chars-minimum"
+    assert service._get_spring_jwt_secret() == "ouros-dev-spring-delegation-secret-key-32-chars-minimum"
+
+
+def test_password_reset_invalid_tokens_and_roles() -> None:
+    service = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+
+    # Invalid purpose
+    bad_purpose_token = jwt.encode(
+        {"sub": "u@f.com", "account_type": "farm_owner", "database_id": 1, "purpose": "login", "jti": "j1", "exp": int(time.time()) + 60, "iat": int(time.time())},
+        service._get_reset_jwt_secret(),
+        algorithm="HS256",
+    )
+    with pytest.raises(PasswordResetTokenInvalidError):
+        asyncio.run(
+            service.confirm_reset(
+                PasswordResetConfirmRequest(reset_token=bad_purpose_token, new_password=SecretStr("NovaSenhaForte@2026"))
+            )
+        )
+
+    # Invalid token signature
+    with pytest.raises(PasswordResetTokenInvalidError):
+        asyncio.run(
+            service.confirm_reset(
+                PasswordResetConfirmRequest(reset_token="invalid.jwt.token", new_password=SecretStr("NovaSenhaForte@2026"))
+            )
+        )
+
+    # Invalid account_type (admin)
+    admin_token = service._mint_reset_token("admin@f.com", "admin", 1)
+    with pytest.raises(PasswordResetTokenInvalidError):
+        asyncio.run(
+            service.confirm_reset(
+                PasswordResetConfirmRequest(reset_token=admin_token, new_password=SecretStr("NovaSenhaForte@2026"))
+            )
+        )
+
+    # Password complexity failure
+    valid_token = service._mint_reset_token("u@f.com", "farm_owner", 1)
+    with pytest.raises(PasswordResetTokenInvalidError):
+        asyncio.run(
+            service.confirm_reset(
+                PasswordResetConfirmRequest.model_construct(reset_token=valid_token, new_password=SecretStr("fraca"))
+            )
+        )
+
+
+def test_password_reset_spring_error_variants() -> None:
+    # Spring 400 with invalid json body
+    mock_client_400 = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(400, text="not json"))
+    )
+    service_400 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_400)
+    token = service_400._mint_reset_token("u@f.com", "farm_owner", 1)
+    with pytest.raises(PasswordResetSpringError) as exc_400:
+        asyncio.run(service_400.confirm_reset(PasswordResetConfirmRequest(reset_token=token, new_password=SecretStr("NovaSenhaForte@2026"))))
+    assert exc_400.value.status_code == 400
+
+    # Spring 404
+    mock_client_404 = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(404))
+    )
+    service_404 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_404)
+    with pytest.raises(PasswordResetSpringError) as exc_404:
+        asyncio.run(service_404.confirm_reset(PasswordResetConfirmRequest(reset_token=token, new_password=SecretStr("NovaSenhaForte@2026"))))
+    assert exc_404.value.status_code == 404
+
+    # Spring 401/403
+    mock_client_401 = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(401))
+    )
+    service_401 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_401)
+    with pytest.raises(PasswordResetSpringError) as exc_401:
+        asyncio.run(service_401.confirm_reset(PasswordResetConfirmRequest(reset_token=token, new_password=SecretStr("NovaSenhaForte@2026"))))
+    assert exc_401.value.status_code == 502
+
+    # Network connection error
+    def network_error_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    mock_client_err = httpx.AsyncClient(transport=httpx.MockTransport(network_error_handler))
+    service_err = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_err)
+    with pytest.raises(PasswordResetSpringError) as exc_err:
+        asyncio.run(service_err.confirm_reset(PasswordResetConfirmRequest(reset_token=token, new_password=SecretStr("NovaSenhaForte@2026"))))
+    assert exc_err.value.status_code == 502
+
+
+def test_password_reset_redis_blacklist_operations() -> None:
+    from app.core.errors import PasswordResetUnavailable
+
+    cfg = make_settings(redis_url="redis://localhost:6379/0")
+    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    fake_redis = FakeAsyncRedis()
+
+    with patch("redis.asyncio.Redis.from_url", return_value=fake_redis):
+        # Initial blacklist check is False
+        assert not asyncio.run(service._is_blacklisted("test-jti-1"))
+
+        # Blacklist the token
+        asyncio.run(service._blacklist_token("test-jti-1", 60))
+
+        # Now blacklist check is True
+        assert asyncio.run(service._is_blacklisted("test-jti-1"))
+
+    # Test Redis ping error
+    service_ping_err = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    with (
+        patch("redis.asyncio.Redis.from_url", return_value=FakeAsyncRedis(fail="ping")),
+        pytest.raises(PasswordResetUnavailable),
+    ):
+        asyncio.run(service_ping_err._redis_client())
+
+    # Test Redis exists error
+    service_exists_err = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    with (
+        patch("redis.asyncio.Redis.from_url", return_value=FakeAsyncRedis(fail="exists")),
+        pytest.raises(PasswordResetUnavailable),
+    ):
+        asyncio.run(service_exists_err._is_blacklisted("some-jti"))
+
+    # Test Redis set error
+    service_set_err = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    with (
+        patch("redis.asyncio.Redis.from_url", return_value=FakeAsyncRedis(fail="set")),
+        pytest.raises(PasswordResetUnavailable),
+    ):
+        asyncio.run(service_set_err._blacklist_token("some-jti", 60))
+
+
+def test_password_reset_memory_cleanup() -> None:
+    service = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    service._blacklist_memory["expired-1"] = time.time() - 100
+    service._blacklist_memory["valid-1"] = time.time() + 100
+
+    service._cleanup_blacklist_memory(time.time())
+    assert "expired-1" not in service._blacklist_memory
+    assert "valid-1" in service._blacklist_memory
+
+
+def test_api_route_start_password_reset_rate_limit_exceeded() -> None:
+    client, _ = build_test_client()
+    for _ in range(3):
+        resp = client.post(
+            "/v1/auth/password/reset/start",
+            json={"email": "produtor@fazenda.com.br"},
+        )
+        assert resp.status_code == 200
+
+    # 4th request from same client triggers rate limiting
+    resp4 = client.post(
+        "/v1/auth/password/reset/start",
+        json={"email": "produtor@fazenda.com.br"},
+    )
+    assert resp4.status_code == 429
+

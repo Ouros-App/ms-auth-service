@@ -138,3 +138,36 @@ def test_missing_client_uses_stable_unknown_bucket() -> None:
     )
 
     assert RateLimiter._client_ip(request) == "unknown"
+
+
+def test_password_reset_rate_limit_ip_blocks_fourth_attempt() -> None:
+    limiter = RateLimiter(make_settings())
+    request = make_request()
+
+    async def scenario() -> None:
+        for _ in range(3):
+            await limiter.check_password_reset_attempt(request, "user@example.com")
+
+        with pytest.raises(RateLimitExceeded) as error:
+            await limiter.check_password_reset_attempt(request, "other@example.com")
+
+        assert error.value.retry_after >= 1
+
+    asyncio.run(scenario())
+
+
+def test_password_reset_rate_limit_email_blocks_sixth_attempt() -> None:
+    limiter = RateLimiter(make_settings())
+
+    async def scenario() -> None:
+        for i in range(5):
+            req = make_request(ip=f"203.0.113.{i+1}")
+            await limiter.check_password_reset_attempt(req, "target@example.com")
+
+        req6 = make_request(ip="203.0.113.99")
+        with pytest.raises(RateLimitExceeded) as error:
+            await limiter.check_password_reset_attempt(req6, "target@example.com")
+
+        assert error.value.retry_after >= 1
+
+    asyncio.run(scenario())

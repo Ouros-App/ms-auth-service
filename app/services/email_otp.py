@@ -400,24 +400,57 @@ class EmailOtpService:
         for challenge_id in expired:
             self._memory.pop(challenge_id, None)
 
-    def _build_email_message(self, recipient: str, code: str) -> EmailMessage:
+    def _build_email_message(
+        self, recipient: str, code: str, purpose: str = "login"
+    ) -> EmailMessage:
         """Build the branded multipart OTP email with an inline Ouros logo."""
         ttl_minutes = max(self._ttl_seconds // 60, 1)
         logo_path = Path(__file__).resolve().parents[1] / "assets" / "ouros-logo.png"
 
+        if purpose == "password_reset":
+            subject = f"{code} é seu código de recuperação de senha Ouros"
+            badge = "Recuperação de Senha"
+            title = "Redefina sua senha"
+            desc = "Recebemos uma solicitação para redefinir a senha da sua conta Ouros. Use o código de 6 dígitos abaixo para continuar."
+            code_label = "Código de verificação"
+            footer_brand = "Ouros &bull; segurança de acesso"
+            note = (
+                "Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros, "
+                "pode ignorar esta mensagem com total segurança. Sua senha atual permanecerá inalterada."
+            )
+            text_body = (
+                "Seu código para recuperação de senha no Ouros é:\n\n"
+                f"{code}\n\n"
+                f"Ele expira em {ttl_minutes} minuto(s).\n\n"
+                "Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros, "
+                "desconsidere este e-mail. Sua senha atual permanecerá inalterada."
+            )
+        else:
+            subject = f"{code} é seu código de acesso Ouros"
+            badge = "Segurança de acesso"
+            title = "Confirme que é você"
+            desc = "Use o código abaixo para concluir seu acesso ao Ouros."
+            code_label = "Seu código"
+            footer_brand = "Ouros &bull; acesso protegido"
+            note = (
+                "Nunca compartilhe este código. Se você não tentou "
+                "entrar no Ouros, pode ignorar esta mensagem com segurança."
+            )
+            text_body = (
+                "Seu código de acesso Ouros é:\n\n"
+                f"{code}\n\n"
+                f"Ele expira em {ttl_minutes} minuto(s).\n"
+                "Nunca compartilhe este código. Se você não tentou entrar, "
+                "ignore esta mensagem."
+            )
+
         message = EmailMessage()
-        message["Subject"] = f"{code} é seu código de acesso Ouros"
+        message["Subject"] = subject
         message["From"] = formataddr(
             (self._smtp_from_display_name, self._smtp_from)
         )
         message["To"] = recipient
-        message.set_content(
-            "Seu código de acesso Ouros é:\n\n"
-            f"{code}\n\n"
-            f"Ele expira em {ttl_minutes} minuto(s).\n"
-            "Nunca compartilhe este código. Se você não tentou entrar, "
-            "ignore esta mensagem."
-        )
+        message.set_content(text_body)
 
         message.add_alternative(
             f"""<!doctype html>
@@ -460,7 +493,7 @@ class EmailOtpService:
                         background:#E9E6F2;
                         border-radius:999px;
                         padding:8px 12px;">
-                        Segurança de acesso
+                        {badge}
                       </div>
 
                       <h1 style="
@@ -471,7 +504,7 @@ class EmailOtpService:
                         letter-spacing:-1.2px;
                         font-weight:700;
                         color:#010B13;">
-                        Confirme que é você
+                        {title}
                       </h1>
 
                       <p style="
@@ -480,7 +513,7 @@ class EmailOtpService:
                         font-size:16px;
                         line-height:1.65;
                         color:#4B4A58;">
-                        Use o código abaixo para concluir seu acesso ao Ouros.
+                        {desc}
                       </p>
                     </td>
                   </tr>
@@ -501,7 +534,7 @@ class EmailOtpService:
                               text-transform:uppercase;
                               color:#D8A23A;
                               margin-bottom:14px;">
-                              Seu código
+                              {code_label}
                             </div>
 
                             <div style="
@@ -543,8 +576,7 @@ class EmailOtpService:
                               font-size:12px;
                               line-height:1.6;
                               color:#777582;">
-                              Nunca compartilhe este código. Se você não tentou
-                              entrar no Ouros, pode ignorar esta mensagem com segurança.
+                              {note}
                             </p>
                           </td>
                         </tr>
@@ -564,7 +596,7 @@ class EmailOtpService:
                   line-height:1.6;
                   letter-spacing:.2px;
                   color:#9B99AA;">
-                  Ouros &bull; acesso protegido
+                  Ouros &bull; {footer_brand.split('&bull; ')[-1]}
                 </p>
               </td>
             </tr>
@@ -593,7 +625,7 @@ class EmailOtpService:
         self._dispatch_email(message)
 
     def _send_password_reset_email(self, recipient: str, code: str) -> None:
-        message = self._build_password_reset_email_message(recipient, code)
+        message = self._build_email_message(recipient, code, purpose="password_reset")
         self._dispatch_email(message)
 
     def _dispatch_email(self, message: EmailMessage) -> None:
@@ -624,196 +656,6 @@ class EmailOtpService:
                     self._smtp_password.get_secret_value(),
                 )
             smtp.send_message(message)
-
-    def _build_password_reset_email_message(
-        self, recipient: str, code: str
-    ) -> EmailMessage:
-        """Build the branded multipart password reset OTP email with an inline Ouros logo."""
-        ttl_minutes = max(self._ttl_seconds // 60, 1)
-        logo_path = Path(__file__).resolve().parents[1] / "assets" / "ouros-logo.png"
-
-        message = EmailMessage()
-        message["Subject"] = f"{code} é seu código de recuperação de senha Ouros"
-        message["From"] = formataddr(
-            (self._smtp_from_display_name, self._smtp_from)
-        )
-        message["To"] = recipient
-        message.set_content(
-            "Seu código para recuperação de senha no Ouros é:\n\n"
-            f"{code}\n\n"
-            f"Ele expira em {ttl_minutes} minuto(s).\n\n"
-            "Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros, "
-            "desconsidere este e-mail. Sua senha atual permanecerá inalterada."
-        )
-
-        message.add_alternative(
-            f"""<!doctype html>
-<html lang="pt-BR">
-  <body style="margin:0;padding:0;background:#010B13;">
-    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
-      Seu código de recuperação Ouros é {code}. Ele expira em {ttl_minutes} minuto(s).
-    </div>
-
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-      border="0" style="width:100%;background:#010B13;margin:0;padding:0;">
-      <tr>
-        <td align="center" style="padding:40px 16px;">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-            border="0"
-            style="width:100%;max-width:600px;border-collapse:separate;">
-            <tr>
-              <td align="center" style="padding:0 0 28px 0;">
-                <img src="cid:ouros-logo" alt="Ouros" width="220"
-                  style="display:block;width:220px;max-width:80%;height:auto;border:0;">
-              </td>
-            </tr>
-
-            <tr>
-              <td style="background:#F2F5F7;border-radius:24px;overflow:hidden;">
-                <div style="height:6px;line-height:6px;background:#D8A23A;">&nbsp;</div>
-
-                <table role="presentation" width="100%" cellspacing="0"
-                  cellpadding="0" border="0" style="width:100%;">
-                  <tr>
-                    <td style="padding:44px 44px 18px 44px;">
-                      <div style="
-                        display:inline-block;
-                        font-family:Poppins,Arial,sans-serif;
-                        font-size:12px;
-                        font-weight:600;
-                        letter-spacing:1.4px;
-                        text-transform:uppercase;
-                        color:#171438;
-                        background:#E9E6F2;
-                        border-radius:999px;
-                        padding:8px 12px;">
-                        Recuperação de Senha
-                      </div>
-
-                      <h1 style="
-                        margin:22px 0 12px 0;
-                        font-family:Poppins,Arial,sans-serif;
-                        font-size:30px;
-                        line-height:1.12;
-                        letter-spacing:-1.2px;
-                        font-weight:700;
-                        color:#010B13;">
-                        Redefina sua senha
-                      </h1>
-
-                      <p style="
-                        margin:0;
-                        font-family:Poppins,Arial,sans-serif;
-                        font-size:16px;
-                        line-height:1.65;
-                        color:#4B4A58;">
-                        Recebemos uma solicitação para redefinir a senha da sua conta Ouros. Use o código de 6 dígitos abaixo para continuar.
-                      </p>
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td style="padding:12px 44px 18px 44px;">
-                      <table role="presentation" width="100%" cellspacing="0"
-                        cellpadding="0" border="0"
-                        style="width:100%;background:#171438;border-radius:18px;">
-                        <tr>
-                          <td align="center" style="padding:28px 18px 24px 18px;">
-                            <div style="
-                              font-family:Poppins,Arial,sans-serif;
-                              font-size:12px;
-                              line-height:1;
-                              font-weight:600;
-                              letter-spacing:1.8px;
-                              text-transform:uppercase;
-                              color:#D8A23A;
-                              margin-bottom:14px;">
-                              Código de verificação
-                            </div>
-
-                            <div style="
-                              font-family:'Courier New',Courier,monospace;
-                              font-size:40px;
-                              line-height:1;
-                              font-weight:700;
-                              letter-spacing:10px;
-                              color:#F2F5F7;
-                              white-space:nowrap;">
-                              {code}
-                            </div>
-                          </td>
-                        </tr>
-                      </table>
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td style="padding:4px 44px 42px 44px;">
-                      <p style="
-                        margin:0 0 18px 0;
-                        font-family:Poppins,Arial,sans-serif;
-                        font-size:14px;
-                        line-height:1.6;
-                        color:#656372;">
-                        Este código expira em
-                        <strong style="color:#010B13;">{ttl_minutes} minuto(s)</strong>.
-                      </p>
-
-                      <table role="presentation" width="100%" cellspacing="0"
-                        cellpadding="0" border="0"
-                        style="width:100%;border-top:1px solid #D9DCE0;">
-                        <tr>
-                          <td style="padding-top:20px;">
-                            <p style="
-                              margin:0;
-                              font-family:Poppins,Arial,sans-serif;
-                              font-size:12px;
-                              line-height:1.6;
-                              color:#777582;">
-                              Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros,
-                              pode ignorar esta mensagem com total segurança. Sua senha atual permanecerá inalterada.
-                            </p>
-                          </td>
-                        </tr>
-                      </table>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-            </tr>
-
-            <tr>
-              <td align="center" style="padding:24px 20px 0 20px;">
-                <p style="
-                  margin:0;
-                  font-family:Poppins,Arial,sans-serif;
-                  font-size:12px;
-                  line-height:1.6;
-                  letter-spacing:.2px;
-                  color:#9B99AA;">
-                  Ouros &bull; segurança de acesso
-                </p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
-</html>""",
-            subtype="html",
-        )
-
-        html_part = message.get_payload()[-1]
-        html_part.add_related(
-            logo_path.read_bytes(),
-            maintype="image",
-            subtype="png",
-            cid="<ouros-logo>",
-            filename="ouros-logo.png",
-            disposition="inline",
-        )
-        return message
 
     @staticmethod
     def _mask_email(email: str) -> str:
