@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 from unittest.mock import patch
 
@@ -98,8 +99,7 @@ class FakeEmailOtpServiceForReset:
         pass
 
 
-@pytest.mark.asyncio
-async def test_service_start_reset_success_farm_owner():
+def test_service_start_reset_success_farm_owner():
     settings = make_settings()
     repo = FakeIdentityRepo(
         [
@@ -114,16 +114,17 @@ async def test_service_start_reset_success_farm_owner():
     otp_service = FakeEmailOtpServiceForReset()
     service = PasswordResetService(settings, repo, otp_service)
 
-    response = await service.start_reset(
-        PasswordResetStartRequest(email="produtor@fazenda.com.br")
+    response = asyncio.run(
+        service.start_reset(
+            PasswordResetStartRequest(email="produtor@fazenda.com.br")
+        )
     )
     assert response.challenge_id.startswith("test-challenge-")
     assert response.masked_email == "p***@fazenda.com.br"
     assert response.expires_in == 300
 
 
-@pytest.mark.asyncio
-async def test_service_start_reset_success_company_employee():
+def test_service_start_reset_success_company_employee():
     settings = make_settings()
     repo = FakeIdentityRepo(
         [
@@ -138,23 +139,26 @@ async def test_service_start_reset_success_company_employee():
     otp_service = FakeEmailOtpServiceForReset()
     service = PasswordResetService(settings, repo, otp_service)
 
-    response = await service.start_reset(
-        PasswordResetStartRequest(email="func@empresa.com.br")
+    response = asyncio.run(
+        service.start_reset(
+            PasswordResetStartRequest(email="func@empresa.com.br")
+        )
     )
     assert response.challenge_id.startswith("test-challenge-")
     assert response.masked_email == "f***@empresa.com.br"
 
 
-@pytest.mark.asyncio
-async def test_service_start_reset_nonexistent_email_returns_dummy():
+def test_service_start_reset_nonexistent_email_returns_dummy():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
     service = PasswordResetService(settings, repo, otp_service)
 
     with patch("app.services.password_reset_service.burn_dummy_password_check") as mock_burn:
-        response = await service.start_reset(
-            PasswordResetStartRequest(email="naoexiste@fazenda.com.br")
+        response = asyncio.run(
+            service.start_reset(
+                PasswordResetStartRequest(email="naoexiste@fazenda.com.br")
+            )
         )
         assert mock_burn.called
         assert len(response.challenge_id) > 20
@@ -164,8 +168,7 @@ async def test_service_start_reset_nonexistent_email_returns_dummy():
         assert len(otp_service.challenges) == 0
 
 
-@pytest.mark.asyncio
-async def test_service_start_reset_admin_account_returns_dummy():
+def test_service_start_reset_admin_account_returns_dummy():
     settings = make_settings()
     repo = FakeIdentityRepo(
         [
@@ -180,15 +183,16 @@ async def test_service_start_reset_admin_account_returns_dummy():
     otp_service = FakeEmailOtpServiceForReset()
     service = PasswordResetService(settings, repo, otp_service)
 
-    response = await service.start_reset(
-        PasswordResetStartRequest(email="admin@ouros.com.br")
+    response = asyncio.run(
+        service.start_reset(
+            PasswordResetStartRequest(email="admin@ouros.com.br")
+        )
     )
     assert response.masked_email == "a***@ouros.com.br"
     assert len(otp_service.challenges) == 0
 
 
-@pytest.mark.asyncio
-async def test_service_start_reset_ambiguous_identity_raises():
+def test_service_start_reset_ambiguous_identity_raises():
     settings = make_settings()
     repo = FakeIdentityRepo(
         [
@@ -200,11 +204,10 @@ async def test_service_start_reset_ambiguous_identity_raises():
     service = PasswordResetService(settings, repo, otp_service)
 
     with pytest.raises(AmbiguousIdentityError):
-        await service.start_reset(PasswordResetStartRequest(email="duplo@fazenda.com.br"))
+        asyncio.run(service.start_reset(PasswordResetStartRequest(email="duplo@fazenda.com.br")))
 
 
-@pytest.mark.asyncio
-async def test_service_verify_code_success():
+def test_service_verify_code_success():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
@@ -218,22 +221,23 @@ async def test_service_verify_code_success():
         "attempts": 0,
     }
 
-    verify_resp = await service.verify_code(
-        PasswordResetVerifyRequest(challenge_id="test-challenge-12345678901234567890", email="user@fazenda.com.br", code="654321")
+    verify_resp = asyncio.run(
+        service.verify_code(
+            PasswordResetVerifyRequest(challenge_id="test-challenge-12345678901234567890", email="user@fazenda.com.br", code="654321")
+        )
     )
     assert verify_resp.reset_token
     assert verify_resp.expires_in == 600
 
     # Decoded token verification
-    claims = await service._verify_reset_token(verify_resp.reset_token)
+    claims = asyncio.run(service._verify_reset_token(verify_resp.reset_token))
     assert claims["sub"] == "user@fazenda.com.br"
     assert claims["account_type"] == "farm_owner"
     assert claims["database_id"] == 42
     assert claims["purpose"] == "password_reset"
 
 
-@pytest.mark.asyncio
-async def test_service_verify_code_invalid_raises():
+def test_service_verify_code_invalid_raises():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
@@ -248,13 +252,14 @@ async def test_service_verify_code_invalid_raises():
     }
 
     with pytest.raises(PasswordResetOtpInvalidError):
-        await service.verify_code(
-            PasswordResetVerifyRequest(challenge_id="test-challenge-12345678901234567890", email="user@fazenda.com.br", code="000000")
+        asyncio.run(
+            service.verify_code(
+                PasswordResetVerifyRequest(challenge_id="test-challenge-12345678901234567890", email="user@fazenda.com.br", code="000000")
+            )
         )
 
 
-@pytest.mark.asyncio
-async def test_service_confirm_reset_success_farm_owner():
+def test_service_confirm_reset_success_farm_owner():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
@@ -271,8 +276,10 @@ async def test_service_confirm_reset_success_farm_owner():
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
-    resp = await service.confirm_reset(
-        PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+    resp = asyncio.run(
+        service.confirm_reset(
+            PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+        )
     )
     assert resp.message == "Senha redefinida com sucesso."
     assert len(recorded_requests) == 1
@@ -283,8 +290,7 @@ async def test_service_confirm_reset_success_farm_owner():
     assert b"NovaSenhaForte@2026" in request.content
 
 
-@pytest.mark.asyncio
-async def test_service_confirm_reset_success_company_employee():
+def test_service_confirm_reset_success_company_employee():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
@@ -301,15 +307,16 @@ async def test_service_confirm_reset_success_company_employee():
 
     reset_token = service._mint_reset_token("func@empresa.com.br", "company_employee", 88)
 
-    resp = await service.confirm_reset(
-        PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+    resp = asyncio.run(
+        service.confirm_reset(
+            PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+        )
     )
     assert resp.message == "Senha redefinida com sucesso."
     assert len(recorded_requests) == 1
 
 
-@pytest.mark.asyncio
-async def test_service_confirm_reset_replay_token_rejected():
+def test_service_confirm_reset_replay_token_rejected():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
@@ -321,19 +328,22 @@ async def test_service_confirm_reset_replay_token_rejected():
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
     # First use succeeds
-    await service.confirm_reset(
-        PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+    asyncio.run(
+        service.confirm_reset(
+            PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+        )
     )
 
     # Replay attempt fails
     with pytest.raises(PasswordResetTokenInvalidError):
-        await service.confirm_reset(
-            PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+        asyncio.run(
+            service.confirm_reset(
+                PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+            )
         )
 
 
-@pytest.mark.asyncio
-async def test_service_confirm_reset_spring_error():
+def test_service_confirm_reset_spring_error():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
@@ -345,8 +355,10 @@ async def test_service_confirm_reset_spring_error():
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
     with pytest.raises(PasswordResetSpringError) as exc_info:
-        await service.confirm_reset(
-            PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+        asyncio.run(
+            service.confirm_reset(
+                PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+            )
         )
     assert exc_info.value.status_code == 502
 
