@@ -1,8 +1,8 @@
 import secrets
 from unittest.mock import patch
 
+import httpx
 import pytest
-import respx
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
@@ -254,50 +254,58 @@ async def test_service_verify_code_invalid_raises():
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_service_confirm_reset_success_farm_owner():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+
+    recorded_requests = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append(request)
+        if request.url.path == "/farm-owners/10" and request.method == "PATCH":
+            return httpx.Response(200, json={"id": 10, "email": "produtor@fazenda.com.br"})
+        return httpx.Response(404)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
-
-    patch_route = respx.patch("https://ms-spring-api.test/farm-owners/10").respond(
-        status_code=200, json={"id": 10, "email": "produtor@fazenda.com.br"}
-    )
 
     resp = await service.confirm_reset(
         PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
     )
     assert resp.message == "Senha redefinida com sucesso."
-    assert patch_route.called
+    assert len(recorded_requests) == 1
 
     # Validate header and body sent to Spring
-    request = patch_route.calls.last.request
+    request = recorded_requests[0]
     assert request.headers["authorization"].startswith("Bearer ")
     assert b"NovaSenhaForte@2026" in request.content
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_service_confirm_reset_success_company_employee():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+
+    recorded_requests = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append(request)
+        if request.url.path == "/company-employees/88" and request.method == "PATCH":
+            return httpx.Response(200, json={"id": 88, "email": "func@empresa.com.br"})
+        return httpx.Response(404)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
 
     reset_token = service._mint_reset_token("func@empresa.com.br", "company_employee", 88)
-
-    patch_route = respx.patch("https://ms-spring-api.test/company-employees/88").respond(
-        status_code=200, json={"id": 88, "email": "func@empresa.com.br"}
-    )
 
     resp = await service.confirm_reset(
         PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
     )
     assert resp.message == "Senha redefinida com sucesso."
-    assert patch_route.called
+    assert len(recorded_requests) == 1
 
 
 @pytest.mark.asyncio
@@ -305,36 +313,36 @@ async def test_service_confirm_reset_replay_token_rejected():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+    mock_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"id": 10}))
+    )
+    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
-    with respx.mock:
-        respx.patch("https://ms-spring-api.test/farm-owners/10").respond(status_code=200)
+    # First use succeeds
+    await service.confirm_reset(
+        PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
+    )
 
-        # First use succeeds
+    # Replay attempt fails
+    with pytest.raises(PasswordResetTokenInvalidError):
         await service.confirm_reset(
             PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
         )
 
-        # Replay attempt fails
-        with pytest.raises(PasswordResetTokenInvalidError):
-            await service.confirm_reset(
-                PasswordResetConfirmRequest(reset_token=reset_token, new_password=SecretStr("NovaSenhaForte@2026"))
-            )
-
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_service_confirm_reset_spring_error():
     settings = make_settings()
     repo = FakeIdentityRepo([])
     otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+    mock_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(500, text="Internal error"))
+    )
+    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
-
-    respx.patch("https://ms-spring-api.test/farm-owners/10").respond(status_code=500, text="Internal error")
 
     with pytest.raises(PasswordResetSpringError) as exc_info:
         await service.confirm_reset(
@@ -351,7 +359,7 @@ class FakeDatabase:
     async def ping(self): return True
 
 
-def build_test_client(settings=None, identity_repo=None, otp_service=None):
+def build_test_client(settings=None, identity_repo=None, otp_service=None, http_client=None):
     cfg = settings or make_settings()
     repo = identity_repo or FakeIdentityRepo(
         [
@@ -364,11 +372,12 @@ def build_test_client(settings=None, identity_repo=None, otp_service=None):
         ]
     )
     otp = otp_service or FakeEmailOtpServiceForReset()
+    service = PasswordResetService(cfg, repo, otp, http_client=http_client)
     app = create_app(
         settings=cfg,
         database=FakeDatabase(),
         email_otp_service=otp,
-        password_reset_service=PasswordResetService(cfg, repo, otp),
+        password_reset_service=service,
     )
     return TestClient(app), otp
 
@@ -476,16 +485,19 @@ def test_api_route_verify_password_reset_attempts_exceeded():
     assert resp.json()["detail"] == "Número máximo de tentativas de digitação do código excedido."
 
 
-@respx.mock
 def test_api_route_confirm_password_reset_success():
-    client, otp = build_test_client()
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/farm-owners/10" and request.method == "PATCH":
+            return httpx.Response(200, json={"id": 10, "email": "produtor@fazenda.com.br"})
+        return httpx.Response(404)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     cfg = make_settings()
+    otp = FakeEmailOtpServiceForReset()
+    client, _ = build_test_client(settings=cfg, otp_service=otp, http_client=mock_client)
+
     service = PasswordResetService(cfg, FakeIdentityRepo([]), otp)
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
-
-    respx.patch("https://ms-spring-api.test/farm-owners/10").respond(
-        status_code=200, json={"id": 10, "email": "produtor@fazenda.com.br"}
-    )
 
     resp = client.post(
         "/v1/auth/password/reset/confirm",
@@ -510,16 +522,16 @@ def test_api_route_confirm_password_reset_weak_password():
     assert resp.status_code == 422
 
 
-@respx.mock
 def test_api_route_confirm_password_reset_spring_error():
-    client, otp = build_test_client()
+    mock_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(502, text="Bad Gateway"))
+    )
     cfg = make_settings()
+    otp = FakeEmailOtpServiceForReset()
+    client, _ = build_test_client(settings=cfg, otp_service=otp, http_client=mock_client)
+
     service = PasswordResetService(cfg, FakeIdentityRepo([]), otp)
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
-
-    respx.patch("https://ms-spring-api.test/farm-owners/10").respond(
-        status_code=502, text="Bad Gateway"
-    )
 
     resp = client.post(
         "/v1/auth/password/reset/confirm",
