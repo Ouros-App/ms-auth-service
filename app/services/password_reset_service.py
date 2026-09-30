@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 import secrets
@@ -8,7 +7,6 @@ import uuid
 
 import httpx
 import jwt
-from pydantic import SecretStr
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -315,7 +313,7 @@ class PasswordResetService:
         if response.status_code == 400:
             try:
                 detail = response.json().get("detail", "Dados da requisição inválidos na API de negócio.")
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 detail = "Dados da requisição inválidos na API de negócio."
             raise PasswordResetSpringError(detail, status_code=400)
 

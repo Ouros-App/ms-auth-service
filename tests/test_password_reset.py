@@ -1,11 +1,6 @@
-import asyncio
-import re
 import secrets
-import time
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
-import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -19,7 +14,6 @@ from app.core.errors import (
     PasswordResetOtpInvalidError,
     PasswordResetSpringError,
     PasswordResetTokenInvalidError,
-    PasswordResetUnavailable,
 )
 from app.main import create_app
 from app.models.identity import AccountType, StoredIdentity
@@ -380,7 +374,7 @@ def build_test_client(settings=None, identity_repo=None, otp_service=None):
 
 
 def test_api_route_start_password_reset_success():
-    client, otp = build_test_client()
+    client, _ = build_test_client()
     resp = client.post(
         "/v1/auth/password/reset/start",
         json={"email": "produtor@fazenda.com.br"},
@@ -393,7 +387,7 @@ def test_api_route_start_password_reset_success():
 
 
 def test_api_route_start_password_reset_dummy():
-    client, otp = build_test_client()
+    client, _ = build_test_client()
     resp = client.post(
         "/v1/auth/password/reset/start",
         json={"email": "desconhecido@fazenda.com.br"},
@@ -405,7 +399,7 @@ def test_api_route_start_password_reset_dummy():
 
 
 def test_api_route_start_password_reset_invalid_email():
-    client, otp = build_test_client()
+    client, _ = build_test_client()
     resp = client.post(
         "/v1/auth/password/reset/start",
         json={"email": "invalid-email-format"},
@@ -505,7 +499,7 @@ def test_api_route_confirm_password_reset_success():
 
 
 def test_api_route_confirm_password_reset_weak_password():
-    client, otp = build_test_client()
+    client, _ = build_test_client()
     resp = client.post(
         "/v1/auth/password/reset/confirm",
         json={
