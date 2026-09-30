@@ -2,6 +2,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
@@ -15,6 +16,11 @@ from app.core.errors import (
     EmailOtpInvalidError,
     EmailOtpUnavailable,
     InvalidCredentialsError,
+    PasswordResetOtpAttemptsExceededError,
+    PasswordResetOtpInvalidError,
+    PasswordResetSpringError,
+    PasswordResetTokenInvalidError,
+    PasswordResetUnavailable,
     RateLimitExceeded,
 )
 from app.core.infisical import load_infisical_secrets
@@ -36,11 +42,25 @@ from app.services.keycloak_token_broker import (
     KeycloakTokenBroker,
     KeycloakTokenBrokerUnavailable,
 )
+from app.services.password_reset_service import PasswordResetService
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(
+@dataclass(slots=True)
+class AppDependencies:
+    settings: Settings
+    database: Database
+    auth_service: AuthService
+    rate_limiter: RateLimiter
+    service_token_verifier: KeycloakServiceTokenVerifier
+    metrics_token_verifier: KeycloakServiceTokenVerifier
+    keycloak_token_broker: KeycloakTokenBroker
+    email_otp_service: EmailOtpService
+    password_reset_service: PasswordResetService
+
+
+def _resolve_dependencies(
     settings: Settings | None = None,
     database: Database | None = None,
     auth_service: AuthService | None = None,
@@ -49,8 +69,8 @@ def create_app(
     metrics_token_verifier: KeycloakServiceTokenVerifier | None = None,
     keycloak_token_broker: KeycloakTokenBroker | None = None,
     email_otp_service: EmailOtpService | None = None,
-) -> FastAPI:
-    """Build the FastAPI application and wire its shared services."""
+    password_reset_service: PasswordResetService | None = None,
+) -> AppDependencies:
     if settings is None:
         load_infisical_secrets()
         get_settings.cache_clear()
@@ -65,6 +85,14 @@ def create_app(
         resolved_settings
     )
     resolved_email_otp_service = email_otp_service or EmailOtpService(resolved_settings)
+    resolved_password_reset_service = (
+        password_reset_service
+        or PasswordResetService(
+            settings=resolved_settings,
+            identity_repository=IdentityRepository(resolved_database),
+            email_otp_service=resolved_email_otp_service,
+        )
+    )
     resolved_service_token_verifier = (
         service_token_verifier
         or KeycloakServiceTokenVerifier(resolved_settings)
@@ -77,35 +105,81 @@ def create_app(
             client_id=resolved_settings.metrics_keycloak_authorized_party,
         )
     )
+    return AppDependencies(
+        settings=resolved_settings,
+        database=resolved_database,
+        auth_service=resolved_auth_service,
+        rate_limiter=resolved_rate_limiter,
+        service_token_verifier=resolved_service_token_verifier,
+        metrics_token_verifier=resolved_metrics_token_verifier,
+        keycloak_token_broker=resolved_keycloak_token_broker,
+        email_otp_service=resolved_email_otp_service,
+        password_reset_service=resolved_password_reset_service,
+    )
+
+
+def create_app(
+    settings: Settings | None = None,
+    database: Database | None = None,
+    auth_service: AuthService | None = None,
+    rate_limiter: RateLimiter | None = None,
+    service_token_verifier: KeycloakServiceTokenVerifier | None = None,
+    metrics_token_verifier: KeycloakServiceTokenVerifier | None = None,
+    keycloak_token_broker: KeycloakTokenBroker | None = None,
+    email_otp_service: EmailOtpService | None = None,
+    password_reset_service: PasswordResetService | None = None,
+) -> FastAPI:
+    """Build the FastAPI application and wire its shared services."""
+    deps = _resolve_dependencies(
+        settings=settings,
+        database=database,
+        auth_service=auth_service,
+        rate_limiter=rate_limiter,
+        service_token_verifier=service_token_verifier,
+        metrics_token_verifier=metrics_token_verifier,
+        keycloak_token_broker=keycloak_token_broker,
+        email_otp_service=email_otp_service,
+        password_reset_service=password_reset_service,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         """Expose dependencies without making liveness depend on their startup."""
-        application.state.database = resolved_database
-        application.state.auth_service = resolved_auth_service
-        application.state.rate_limiter = resolved_rate_limiter
-        application.state.service_token_verifier = resolved_service_token_verifier
-        application.state.metrics_token_verifier = resolved_metrics_token_verifier
-        application.state.keycloak_token_broker = resolved_keycloak_token_broker
-        application.state.email_otp_service = resolved_email_otp_service
-        application.state.settings = resolved_settings
+        application.state.database = deps.database
+        application.state.auth_service = deps.auth_service
+        application.state.rate_limiter = deps.rate_limiter
+        application.state.service_token_verifier = deps.service_token_verifier
+        application.state.metrics_token_verifier = deps.metrics_token_verifier
+        application.state.keycloak_token_broker = deps.keycloak_token_broker
+        application.state.email_otp_service = deps.email_otp_service
+        application.state.password_reset_service = deps.password_reset_service
+        application.state.settings = deps.settings
         try:
             yield
         finally:
-            await resolved_email_otp_service.close()
-            await resolved_rate_limiter.close()
-            await resolved_database.close()
+            await deps.password_reset_service.close()
+            await deps.email_otp_service.close()
+            await deps.rate_limiter.close()
+            await deps.database.close()
 
     application = FastAPI(
         title="Ouros Auth Service",
-        version=resolved_settings.app_version,
+        version=deps.settings.app_version,
         description=(
             "Central credential verification service for Ouros. "
             "M3 adds an authenticated bridge for Keycloak User Storage."
         ),
         lifespan=lifespan,
     )
-
+    application.state.database = deps.database
+    application.state.auth_service = deps.auth_service
+    application.state.rate_limiter = deps.rate_limiter
+    application.state.service_token_verifier = deps.service_token_verifier
+    application.state.metrics_token_verifier = deps.metrics_token_verifier
+    application.state.keycloak_token_broker = deps.keycloak_token_broker
+    application.state.email_otp_service = deps.email_otp_service
+    application.state.password_reset_service = deps.password_reset_service
+    application.state.settings = deps.settings
 
     @application.middleware("http")
     async def password_broker_cutover_guard(
@@ -114,7 +188,7 @@ def create_app(
     ):
         """Hide legacy password-broker routes before request-body parsing."""
         if (
-            not resolved_settings.keycloak_password_broker_enabled
+            not deps.settings.keycloak_password_broker_enabled
             and request.method == "POST"
             and request.url.path == "/v1/auth/token"
         ):
@@ -230,6 +304,57 @@ def create_app(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Muitas tentativas. Tente novamente mais tarde."},
             headers={"Retry-After": str(exception.retry_after)},
+        )
+
+    @application.exception_handler(PasswordResetOtpInvalidError)
+    async def password_reset_otp_invalid_handler(
+        _request: Request,
+        _exception: PasswordResetOtpInvalidError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": "Código inválido, incorreto ou expirado."},
+        )
+
+    @application.exception_handler(PasswordResetOtpAttemptsExceededError)
+    async def password_reset_otp_attempts_handler(
+        _request: Request,
+        _exception: PasswordResetOtpAttemptsExceededError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"detail": "Número máximo de tentativas de digitação do código excedido."},
+        )
+
+    @application.exception_handler(PasswordResetTokenInvalidError)
+    async def password_reset_token_invalid_handler(
+        _request: Request,
+        exception: PasswordResetTokenInvalidError,
+    ) -> JSONResponse:
+        detail = str(exception) if str(exception) else "Token de recuperação inválido ou expirado."
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": detail},
+        )
+
+    @application.exception_handler(PasswordResetSpringError)
+    async def password_reset_spring_error_handler(
+        _request: Request,
+        exception: PasswordResetSpringError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exception.status_code,
+            content={"detail": exception.detail},
+        )
+
+    @application.exception_handler(PasswordResetUnavailable)
+    async def password_reset_unavailable_handler(
+        _request: Request,
+        _exception: PasswordResetUnavailable,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Serviço de recuperação de senha temporariamente indisponível."},
         )
 
     application.include_router(router)

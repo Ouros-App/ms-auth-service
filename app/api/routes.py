@@ -17,6 +17,12 @@ from app.schemas.auth import (
     KeycloakTokenResponse,
     NativeLoginStartResponse,
     NativeLoginVerifyRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetConfirmResponse,
+    PasswordResetStartRequest,
+    PasswordResetStartResponse,
+    PasswordResetVerifyRequest,
+    PasswordResetVerifyResponse,
     TokenLoginRequest,
     TokenRefreshRequest,
 )
@@ -24,6 +30,7 @@ from app.schemas.common import HealthResponse, ReadinessResponse
 from app.services.auth_service import AuthService
 from app.services.email_otp import EmailOtpService
 from app.services.keycloak_token_broker import KeycloakTokenBroker
+from app.services.password_reset_service import PasswordResetService
 
 router = APIRouter()
 
@@ -63,11 +70,19 @@ def get_email_otp_service(request: Request) -> EmailOtpService:
     return request.app.state.email_otp_service
 
 
+def get_password_reset_service(request: Request) -> PasswordResetService:
+    """Resolve the shared password reset service from application state."""
+    return request.app.state.password_reset_service
+
+
 AuthServiceDependency = Annotated[AuthService, Depends(get_auth_service)]
 DatabaseDependency = Annotated[Database, Depends(get_database)]
 RateLimiterDependency = Annotated[RateLimiter, Depends(get_rate_limiter)]
 TokenBrokerDependency = Annotated[KeycloakTokenBroker, Depends(get_token_broker)]
 EmailOtpDependency = Annotated[EmailOtpService, Depends(get_email_otp_service)]
+PasswordResetDependency = Annotated[
+    PasswordResetService, Depends(get_password_reset_service)
+]
 SettingsDependency = Annotated[Settings, Depends(get_runtime_settings)]
 MetricsTokenVerifierDependency = Annotated[
     KeycloakServiceTokenVerifier,
@@ -241,3 +256,45 @@ async def refresh_keycloak_token(
 ) -> KeycloakTokenResponse:
     """Rotate a long-lived first-party session without repeating email OTP."""
     return await token_broker.refresh_token(payload)
+
+
+@router.post(
+    "/v1/auth/password/reset/start",
+    tags=["auth"],
+    summary="Start password reset flow and send email code",
+)
+async def start_password_reset(
+    request: Request,
+    payload: PasswordResetStartRequest,
+    service: PasswordResetDependency,
+    rate_limiter: RateLimiterDependency,
+) -> PasswordResetStartResponse:
+    """Validate rate limit (3/min IP, 5/15min email) and dispatch recovery challenge."""
+    await rate_limiter.check_password_reset_attempt(request, payload.email)
+    return await service.start_reset(payload)
+
+
+@router.post(
+    "/v1/auth/password/reset/verify",
+    tags=["auth"],
+    summary="Verify password reset OTP code and receive ephemeral reset token",
+)
+async def verify_password_reset(
+    payload: PasswordResetVerifyRequest,
+    service: PasswordResetDependency,
+) -> PasswordResetVerifyResponse:
+    """Verify the 6-digit OTP code and return an ephemeral reset token."""
+    return await service.verify_code(payload)
+
+
+@router.post(
+    "/v1/auth/password/reset/confirm",
+    tags=["auth"],
+    summary="Confirm new password and update via Spring API",
+)
+async def confirm_password_reset(
+    payload: PasswordResetConfirmRequest,
+    service: PasswordResetDependency,
+) -> PasswordResetConfirmResponse:
+    """Validate ephemeral reset token, password rules, and delegate password update."""
+    return await service.confirm_reset(payload)

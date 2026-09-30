@@ -20,3 +20,28 @@ class EmailOtpInvalidError(Exception):
 
 class EmailOtpUnavailable(Exception):
     """Raised when the email OTP subsystem cannot create or verify challenges."""
+
+
+class PasswordResetOtpInvalidError(Exception):
+    """Raised when a password reset OTP challenge is missing, expired or invalid."""
+
+
+class PasswordResetOtpAttemptsExceededError(Exception):
+    """Raised when max attempts for password reset OTP verification are exceeded."""
+
+
+class PasswordResetTokenInvalidError(Exception):
+    """Raised when a reset token is invalid, expired, or already used."""
+
+
+class PasswordResetSpringError(Exception):
+    """Raised when the Spring business API returns an error during password reset."""
+
+    def __init__(self, detail: str = "Falha na comunicação com o serviço de atualização de senha.", status_code: int = 502) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
+class PasswordResetUnavailable(Exception):
+    """Raised when the password reset subsystem is temporarily unavailable."""

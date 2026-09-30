@@ -16,9 +16,48 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import Settings
-from app.core.errors import EmailOtpInvalidError, EmailOtpUnavailable
+from app.core.errors import (
+    EmailOtpInvalidError,
+    EmailOtpUnavailable,
+    PasswordResetOtpAttemptsExceededError,
+    PasswordResetOtpInvalidError,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# Read, count failed attempts, and consume successful challenges in one operation.
+_VERIFY_PASSWORD_RESET_SCRIPT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {0} end
+local ok, record = pcall(cjson.decode, raw)
+if not ok or type(record) ~= 'table'
+    or type(record.email) ~= 'string'
+    or type(record.code_digest) ~= 'string'
+    or type(record.expires_at) ~= 'number'
+    or type(record.attempts) ~= 'number'
+    or record.purpose ~= 'password_reset'
+    or record.expires_at <= tonumber(ARGV[3]) then
+    redis.call('DEL', KEYS[1])
+    return {0}
+end
+local max_attempts = tonumber(ARGV[4])
+if record.attempts >= max_attempts then
+    redis.call('DEL', KEYS[1])
+    return {-1}
+end
+if record.email ~= ARGV[1] or record.code_digest ~= ARGV[2] then
+    record.attempts = record.attempts + 1
+    if record.attempts >= max_attempts then
+        redis.call('DEL', KEYS[1])
+        return {-1}
+    end
+    redis.call('SET', KEYS[1], cjson.encode(record), 'KEEPTTL')
+    return {0}
+end
+redis.call('DEL', KEYS[1])
+return {1, raw}
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +73,7 @@ class EmailOtpService:
     """Create and verify native email OTP challenges without storing passwords."""
 
     _KEY_PREFIX = "ouros:auth:email-otp:"
+    _KEY_PREFIX_RESET = "ouros:auth:password-reset-otp:"
     _REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
 
     def __init__(self, settings: Settings) -> None:
@@ -46,6 +86,7 @@ class EmailOtpService:
         self._redis_lock = asyncio.Lock()
         self._memory: dict[str, dict[str, object]] = {}
         self._memory_lock = asyncio.Lock()
+        self._delivery_tasks: set[asyncio.Task[None]] = set()
 
         self._smtp_host = settings.ouros_smtp_host
         self._smtp_port = settings.ouros_smtp_port
@@ -59,7 +100,12 @@ class EmailOtpService:
         self._smtp_timeout_seconds = settings.ouros_smtp_timeout_seconds
 
     async def close(self) -> None:
-        """Close the dedicated Redis client when one was opened."""
+        """Finish pending deliveries before closing the dedicated Redis client."""
+        if self._delivery_tasks:
+            await asyncio.gather(*self._delivery_tasks)
+        await self._close_redis()
+
+    async def _close_redis(self) -> None:
         if self._redis is not None:
             await self._redis.aclose()
             self._redis = None
@@ -147,6 +193,133 @@ class EmailOtpService:
 
         await self._delete(challenge_id)
 
+    async def start_password_reset(
+        self,
+        email: str,
+        account_type: str,
+        database_id: int,
+    ) -> EmailOtpChallenge:
+        """Create one password reset challenge and send email with reset code."""
+        self._require_ready()
+
+        normalized_email = email.strip().lower()
+        challenge_id = secrets.token_urlsafe(32)
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        expires_at = int(time.time()) + self._ttl_seconds
+        record: dict[str, object] = {
+            "email": normalized_email,
+            "account_type": account_type,
+            "database_id": database_id,
+            "code_digest": self._code_digest(challenge_id, code),
+            "attempts": 0,
+            "expires_at": expires_at,
+            "purpose": "password_reset",
+        }
+
+        await self._save(
+            challenge_id,
+            record,
+            self._ttl_seconds,
+            prefix=self._KEY_PREFIX_RESET,
+        )
+        task = asyncio.create_task(
+            self._deliver_password_reset_email(challenge_id, normalized_email, code)
+        )
+        self._delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_tasks.discard)
+
+        return EmailOtpChallenge(
+            challenge_id=challenge_id,
+            expires_in=self._ttl_seconds,
+            masked_email=self._mask_email(normalized_email),
+        )
+
+    async def _deliver_password_reset_email(
+        self, challenge_id: str, email: str, code: str
+    ) -> None:
+        try:
+            await asyncio.to_thread(self._send_password_reset_email, email, code)
+        except (OSError, smtplib.SMTPException) as exc:
+            logger.warning(
+                "password_reset_email_delivery_failed error_type=%s smtp_code=%s errno=%s",
+                type(exc).__name__,
+                getattr(exc, "smtp_code", None),
+                getattr(exc, "errno", None),
+            )
+            try:
+                await self._delete(challenge_id, prefix=self._KEY_PREFIX_RESET)
+            except EmailOtpUnavailable:
+                logger.warning("password_reset_email_cleanup_failed")
+
+    async def verify_password_reset(
+        self,
+        challenge_id: str,
+        email: str,
+        code: str,
+    ) -> dict[str, object]:
+        """Consume one password reset OTP challenge and return stored identity metadata."""
+        self._require_ready()
+
+        normalized_email = email.strip().lower()
+        submitted_digest = self._code_digest(challenge_id, code)
+        if self._redis_url is not None:
+            client = await self._redis_client()
+            try:
+                result = await client.eval(
+                    _VERIFY_PASSWORD_RESET_SCRIPT,
+                    1,
+                    self._KEY_PREFIX_RESET + challenge_id,
+                    normalized_email,
+                    submitted_digest,
+                    int(time.time()),
+                    self._max_attempts,
+                )
+            except (RedisError, OSError) as exc:
+                await self._close_redis()
+                raise EmailOtpUnavailable("Redis verification failed") from exc
+            if result[0] == -1:
+                raise PasswordResetOtpAttemptsExceededError
+            if result[0] != 1:
+                raise PasswordResetOtpInvalidError
+            return json.loads(result[1])
+
+        async with self._memory_lock:
+            self._cleanup_memory()
+            key = f"reset:{challenge_id}"
+            record = self._memory.get(key)
+            if record is None:
+                raise PasswordResetOtpInvalidError
+
+            record_email = record.get("email")
+            expires_at = record.get("expires_at")
+            attempts = record.get("attempts")
+            code_digest = record.get("code_digest")
+            if (
+                not isinstance(record_email, str)
+                or not isinstance(expires_at, int)
+                or not isinstance(attempts, int)
+                or not isinstance(code_digest, str)
+                or record.get("purpose") != "password_reset"
+            ):
+                self._memory.pop(key, None)
+                raise PasswordResetOtpInvalidError
+
+            if attempts >= self._max_attempts:
+                self._memory.pop(key, None)
+                raise PasswordResetOtpAttemptsExceededError
+
+            email_matches = hmac.compare_digest(record_email.encode(), normalized_email.encode())
+            code_matches = hmac.compare_digest(code_digest, submitted_digest)
+            if not (email_matches and code_matches):
+                record["attempts"] = attempts + 1
+                if attempts + 1 >= self._max_attempts:
+                    self._memory.pop(key, None)
+                    raise PasswordResetOtpAttemptsExceededError
+                raise PasswordResetOtpInvalidError
+
+            self._memory.pop(key, None)
+            return dict(record)
+
     def _require_ready(self) -> None:
         if not self._enabled:
             raise EmailOtpUnavailable("email OTP is disabled")
@@ -188,58 +361,88 @@ class EmailOtpService:
         challenge_id: str,
         record: dict[str, object],
         ttl_seconds: int,
+        prefix: str | None = None,
     ) -> None:
+        key_prefix = prefix or self._KEY_PREFIX
+        full_key = key_prefix + challenge_id
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
                 await client.set(
-                    self._KEY_PREFIX + challenge_id,
+                    full_key,
                     json.dumps(record, separators=(",", ":")),
                     ex=max(ttl_seconds, 1),
                 )
             except (RedisError, OSError) as exc:
-                await self.close()
+                await self._close_redis()
                 raise EmailOtpUnavailable("Redis write failed") from exc
             return
 
+        mem_key = (
+            challenge_id
+            if (prefix is None or prefix == self._KEY_PREFIX)
+            else f"reset:{challenge_id}"
+        )
         async with self._memory_lock:
             self._cleanup_memory()
-            self._memory[challenge_id] = dict(record)
+            self._memory[mem_key] = dict(record)
 
-    async def _load(self, challenge_id: str) -> dict[str, object] | None:
+    async def _load(
+        self,
+        challenge_id: str,
+        prefix: str | None = None,
+    ) -> dict[str, object] | None:
+        key_prefix = prefix or self._KEY_PREFIX
+        full_key = key_prefix + challenge_id
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
-                raw = await client.get(self._KEY_PREFIX + challenge_id)
+                raw = await client.get(full_key)
             except (RedisError, OSError) as exc:
-                await self.close()
+                await self._close_redis()
                 raise EmailOtpUnavailable("Redis read failed") from exc
             if raw is None:
                 return None
             try:
                 data = json.loads(raw)
             except (TypeError, json.JSONDecodeError):
-                await self._delete(challenge_id)
+                await self._delete(challenge_id, prefix=key_prefix)
                 return None
             return data if isinstance(data, dict) else None
 
+        mem_key = (
+            challenge_id
+            if (prefix is None or prefix == self._KEY_PREFIX)
+            else f"reset:{challenge_id}"
+        )
         async with self._memory_lock:
             self._cleanup_memory()
-            record = self._memory.get(challenge_id)
+            record = self._memory.get(mem_key)
             return dict(record) if record is not None else None
 
-    async def _delete(self, challenge_id: str) -> None:
+    async def _delete(
+        self,
+        challenge_id: str,
+        prefix: str | None = None,
+    ) -> None:
+        key_prefix = prefix or self._KEY_PREFIX
+        full_key = key_prefix + challenge_id
         if self._redis_url is not None:
             client = await self._redis_client()
             try:
-                await client.delete(self._KEY_PREFIX + challenge_id)
+                await client.delete(full_key)
             except (RedisError, OSError) as exc:
-                await self.close()
+                await self._close_redis()
                 raise EmailOtpUnavailable("Redis delete failed") from exc
             return
 
+        mem_key = (
+            challenge_id
+            if (prefix is None or prefix == self._KEY_PREFIX)
+            else f"reset:{challenge_id}"
+        )
         async with self._memory_lock:
-            self._memory.pop(challenge_id, None)
+            self._memory.pop(mem_key, None)
 
     def _cleanup_memory(self) -> None:
         now = int(time.time())
@@ -252,24 +455,57 @@ class EmailOtpService:
         for challenge_id in expired:
             self._memory.pop(challenge_id, None)
 
-    def _build_email_message(self, recipient: str, code: str) -> EmailMessage:
+    def _build_email_message(
+        self, recipient: str, code: str, purpose: str = "login"
+    ) -> EmailMessage:
         """Build the branded multipart OTP email with an inline Ouros logo."""
         ttl_minutes = max(self._ttl_seconds // 60, 1)
         logo_path = Path(__file__).resolve().parents[1] / "assets" / "ouros-logo.png"
 
+        if purpose == "password_reset":
+            subject = f"{code} é seu código de recuperação de senha Ouros"
+            badge = "Recuperação de Senha"
+            title = "Redefina sua senha"
+            desc = "Recebemos uma solicitação para redefinir a senha da sua conta Ouros. Use o código de 6 dígitos abaixo para continuar."
+            code_label = "Código de verificação"
+            footer_brand = "Ouros &bull; segurança de acesso"
+            note = (
+                "Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros, "
+                "pode ignorar esta mensagem com total segurança. Sua senha atual permanecerá inalterada."
+            )
+            text_body = (
+                "Seu código para recuperação de senha no Ouros é:\n\n"
+                f"{code}\n\n"
+                f"Ele expira em {ttl_minutes} minuto(s).\n\n"
+                "Nunca compartilhe este código. Se você não solicitou a redefinição de senha da sua conta Ouros, "
+                "desconsidere este e-mail. Sua senha atual permanecerá inalterada."
+            )
+        else:
+            subject = f"{code} é seu código de acesso Ouros"
+            badge = "Segurança de acesso"
+            title = "Confirme que é você"
+            desc = "Use o código abaixo para concluir seu acesso ao Ouros."
+            code_label = "Seu código"
+            footer_brand = "Ouros &bull; acesso protegido"
+            note = (
+                "Nunca compartilhe este código. Se você não tentou "
+                "entrar no Ouros, pode ignorar esta mensagem com segurança."
+            )
+            text_body = (
+                "Seu código de acesso Ouros é:\n\n"
+                f"{code}\n\n"
+                f"Ele expira em {ttl_minutes} minuto(s).\n"
+                "Nunca compartilhe este código. Se você não tentou entrar, "
+                "ignore esta mensagem."
+            )
+
         message = EmailMessage()
-        message["Subject"] = f"{code} é seu código de acesso Ouros"
+        message["Subject"] = subject
         message["From"] = formataddr(
             (self._smtp_from_display_name, self._smtp_from)
         )
         message["To"] = recipient
-        message.set_content(
-            "Seu código de acesso Ouros é:\n\n"
-            f"{code}\n\n"
-            f"Ele expira em {ttl_minutes} minuto(s).\n"
-            "Nunca compartilhe este código. Se você não tentou entrar, "
-            "ignore esta mensagem."
-        )
+        message.set_content(text_body)
 
         message.add_alternative(
             f"""<!doctype html>
@@ -312,7 +548,7 @@ class EmailOtpService:
                         background:#E9E6F2;
                         border-radius:999px;
                         padding:8px 12px;">
-                        Segurança de acesso
+                        {badge}
                       </div>
 
                       <h1 style="
@@ -323,7 +559,7 @@ class EmailOtpService:
                         letter-spacing:-1.2px;
                         font-weight:700;
                         color:#010B13;">
-                        Confirme que é você
+                        {title}
                       </h1>
 
                       <p style="
@@ -332,7 +568,7 @@ class EmailOtpService:
                         font-size:16px;
                         line-height:1.65;
                         color:#4B4A58;">
-                        Use o código abaixo para concluir seu acesso ao Ouros.
+                        {desc}
                       </p>
                     </td>
                   </tr>
@@ -353,7 +589,7 @@ class EmailOtpService:
                               text-transform:uppercase;
                               color:#D8A23A;
                               margin-bottom:14px;">
-                              Seu código
+                              {code_label}
                             </div>
 
                             <div style="
@@ -395,8 +631,7 @@ class EmailOtpService:
                               font-size:12px;
                               line-height:1.6;
                               color:#777582;">
-                              Nunca compartilhe este código. Se você não tentou
-                              entrar no Ouros, pode ignorar esta mensagem com segurança.
+                              {note}
                             </p>
                           </td>
                         </tr>
@@ -416,7 +651,7 @@ class EmailOtpService:
                   line-height:1.6;
                   letter-spacing:.2px;
                   color:#9B99AA;">
-                  Ouros &bull; acesso protegido
+                  Ouros &bull; {footer_brand.split('&bull; ')[-1]}
                 </p>
               </td>
             </tr>
@@ -441,10 +676,16 @@ class EmailOtpService:
         return message
 
     def _send_email(self, recipient: str, code: str) -> None:
+        message = self._build_email_message(recipient, code)
+        self._dispatch_email(message)
+
+    def _send_password_reset_email(self, recipient: str, code: str) -> None:
+        message = self._build_email_message(recipient, code, purpose="password_reset")
+        self._dispatch_email(message)
+
+    def _dispatch_email(self, message: EmailMessage) -> None:
         if not self._smtp_host:
             raise EmailOtpUnavailable("SMTP host is not configured")
-
-        message = self._build_email_message(recipient, code)
 
         context = ssl.create_default_context()
         smtp_type = smtplib.SMTP_SSL if self._smtp_ssl else smtplib.SMTP
