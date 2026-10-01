@@ -67,11 +67,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> "Settings":
-        if self.environment.strip().lower() != "development":
-            for name in ("password_reset_jwt_secret", "spring_jwt_secret"):
-                secret = getattr(self, name)
-                if secret is None or len(secret.get_secret_value()) < 32:
-                    raise ValueError(f"{name.upper()} must contain at least 32 characters")
         if self.database_max_pool_size < self.database_min_pool_size:
             raise ValueError("DATABASE_MAX_POOL_SIZE must be >= DATABASE_MIN_POOL_SIZE")
         if not self.keycloak_metrics_audience.strip():
