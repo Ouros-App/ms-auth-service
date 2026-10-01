@@ -91,6 +91,25 @@ _FIND_BY_ID_SQL = {
 }
 
 
+_UPDATE_PASSWORD_SQL = {
+    AccountType.FARM_OWNER: """
+        UPDATE public.farm_owners
+        SET password = $1
+        WHERE id = $2
+    """,
+    AccountType.COMPANY_EMPLOYEE: """
+        UPDATE public.company_employees
+        SET password = $1
+        WHERE id = $2
+    """,
+    AccountType.ADMIN: """
+        UPDATE public.adms
+        SET password = $1
+        WHERE id = $2
+    """,
+}
+
+
 def _row_to_identity(row) -> StoredIdentity:
     """Map one normalized database row into the domain identity model."""
     return StoredIdentity(
@@ -140,3 +159,18 @@ class IdentityRepository:
         if row is None:
             return None
         return _row_to_identity(row)
+
+    async def update_password(
+        self,
+        account_type: AccountType,
+        database_id: int,
+        password_hash: str,
+    ) -> bool:
+        """Update password hash for a specific identity by account type and id."""
+        sql = _UPDATE_PASSWORD_SQL.get(account_type)
+        if sql is None:
+            return False
+        async with self._database.connection() as connection:
+            result = await connection.execute(sql, password_hash, database_id)
+        return result.startswith("UPDATE ") and result != "UPDATE 0"
+
