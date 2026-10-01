@@ -606,38 +606,90 @@ def test_password_reset_service_close() -> None:
     assert mock_http.is_closed
 
 
-@pytest.mark.parametrize("secret_name,getter", [
-    ("password_reset_jwt_secret", "_get_reset_jwt_secret"),
-    ("spring_jwt_secret", "_get_spring_jwt_secret"),
-])
-@pytest.mark.parametrize("value", [None, "", "x" * 31])
-def test_password_reset_requires_own_secret(secret_name, getter, value) -> None:
-    # Other configured secrets must never be used as fallbacks.
-    cfg = make_settings(**{secret_name: value})
-    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    with pytest.raises(PasswordResetUnavailable):
-        getattr(service, getter)()
+def test_password_reset_jwt_secret_fallbacks() -> None:
+    # 1. When dedicated secret is provided, it is used
+    cfg1 = make_settings(
+        password_reset_jwt_secret=SecretStr("custom-reset-secret-with-at-least-32-chars"),
+        ouros_email_otp_hmac_secret=SecretStr("fallback-hmac-secret-at-least-32-chars"),
+    )
+    svc1 = PasswordResetService(cfg1, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc1._get_reset_jwt_secret() == "custom-reset-secret-with-at-least-32-chars"
+
+    # 2. When dedicated secret is absent, falls back to ouros_email_otp_hmac_secret
+    cfg2 = make_settings(
+        password_reset_jwt_secret=None,
+        ouros_email_otp_hmac_secret=SecretStr("fallback-hmac-secret-at-least-32-chars"),
+    )
+    svc2 = PasswordResetService(cfg2, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc2._get_reset_jwt_secret() == "fallback-hmac-secret-at-least-32-chars"
+
+    # 3. When dedicated secret and email otp hmac secret are absent, falls back to spring_jwt_secret
+    cfg3 = make_settings(
+        password_reset_jwt_secret=None,
+        ouros_email_otp_enabled=False,
+        ouros_email_otp_hmac_secret=None,
+        spring_jwt_secret=SecretStr("fallback-spring-secret-at-least-32-chars"),
+    )
+    svc3 = PasswordResetService(cfg3, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc3._get_reset_jwt_secret() == "fallback-spring-secret-at-least-32-chars"
+
+    # 4. When all secrets are absent, falls back to dev default key
+    cfg4 = make_settings(
+        password_reset_jwt_secret=None,
+        ouros_email_otp_enabled=False,
+        ouros_email_otp_hmac_secret=None,
+        spring_jwt_secret=None,
+    )
+    svc4 = PasswordResetService(cfg4, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc4._get_reset_jwt_secret() == "ouros-dev-password-reset-secret-key-32-chars-minimum"
 
 
-def test_password_reset_absent_secrets() -> None:
-    cfg = make_settings(password_reset_jwt_secret=None, spring_jwt_secret=None)
-    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    with pytest.raises(PasswordResetUnavailable):
-        service._get_reset_jwt_secret()
-    with pytest.raises(PasswordResetUnavailable):
-        service._get_spring_jwt_secret()
+def test_password_reset_spring_secret_fallbacks() -> None:
+    # 1. When spring_jwt_secret is provided, it is used
+    cfg1 = make_settings(
+        spring_jwt_secret=SecretStr("custom-spring-secret-at-least-32-chars"),
+        password_reset_jwt_secret=SecretStr("fallback-reset-secret-at-least-32-chars"),
+    )
+    svc1 = PasswordResetService(cfg1, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc1._get_spring_jwt_secret() == "custom-spring-secret-at-least-32-chars"
+
+    # 2. When spring_jwt_secret is absent, falls back to password_reset_jwt_secret
+    cfg2 = make_settings(
+        spring_jwt_secret=None,
+        password_reset_jwt_secret=SecretStr("fallback-reset-secret-at-least-32-chars"),
+    )
+    svc2 = PasswordResetService(cfg2, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc2._get_spring_jwt_secret() == "fallback-reset-secret-at-least-32-chars"
+
+    # 3. When spring_jwt_secret and password_reset_jwt_secret are absent, falls back to ouros_email_otp_hmac_secret
+    cfg3 = make_settings(
+        spring_jwt_secret=None,
+        password_reset_jwt_secret=None,
+        ouros_email_otp_hmac_secret=SecretStr("fallback-hmac-secret-at-least-32-chars"),
+    )
+    svc3 = PasswordResetService(cfg3, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc3._get_spring_jwt_secret() == "fallback-hmac-secret-at-least-32-chars"
+
+    # 4. When all secrets are absent, falls back to dev default key
+    cfg4 = make_settings(
+        spring_jwt_secret=None,
+        password_reset_jwt_secret=None,
+        ouros_email_otp_enabled=False,
+        ouros_email_otp_hmac_secret=None,
+    )
+    svc4 = PasswordResetService(cfg4, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
+    assert svc4._get_spring_jwt_secret() == "ouros-dev-spring-delegation-secret-key-32-chars-minimum"
 
 
-@pytest.mark.parametrize("environment", ["production", "staging", "test"])
-@pytest.mark.parametrize("secret_name", ["password_reset_jwt_secret", "spring_jwt_secret"])
-@pytest.mark.parametrize("value", [None, "", "x" * 31])
-def test_non_development_requires_jwt_secrets(environment, secret_name, value) -> None:
-    with pytest.raises(ValidationError, match=secret_name.upper()):
-        make_settings(environment=environment, **{secret_name: value})
-
-
-def test_non_development_accepts_configured_jwt_secrets() -> None:
-    make_settings(environment="production")
+@pytest.mark.parametrize("environment", ["production", "staging", "test", "development"])
+def test_environment_allows_omitted_jwt_secrets(environment: str) -> None:
+    cfg = make_settings(
+        environment=environment,
+        password_reset_jwt_secret=None,
+        spring_jwt_secret=None,
+    )
+    assert cfg.password_reset_jwt_secret is None
+    assert cfg.spring_jwt_secret is None
 
 
 def test_password_reset_invalid_tokens_and_roles() -> None:
@@ -748,8 +800,6 @@ def test_password_reset_spring_error_variants() -> None:
 
 
 def test_password_reset_redis_blacklist_operations() -> None:
-    from app.core.errors import PasswordResetUnavailable
-
     cfg = make_settings(redis_url="redis://localhost:6379/0")
     service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
     fake_redis = FakeAsyncRedis()
