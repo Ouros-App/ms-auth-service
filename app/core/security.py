@@ -30,3 +30,11 @@ def verify_password(raw_password: str, encoded_password: str) -> bool:
 def burn_dummy_password_check(raw_password: str) -> None:
     """Keep missing-user requests closer to the cost of a real login attempt."""
     verify_password(raw_password, _DUMMY_BCRYPT_HASH)
+
+
+def hash_password(raw_password: str) -> str:
+    """Generate a Spring Security-compatible bcrypt hash with standard 12 rounds."""
+    password_bytes = raw_password.encode("utf-8")
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(password_bytes, salt).decode("utf-8")
+

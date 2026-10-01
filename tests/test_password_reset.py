@@ -14,7 +14,6 @@ from app.core.errors import (
     EmailOtpUnavailable,
     PasswordResetOtpAttemptsExceededError,
     PasswordResetOtpInvalidError,
-    PasswordResetSpringError,
     PasswordResetTokenInvalidError,
     PasswordResetUnavailable,
 )
@@ -60,6 +59,24 @@ class FakeIdentityRepo:
             if i.account_type == account_type and i.database_id == database_id:
                 return i
         return None
+
+    async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
+        for idx, i in enumerate(self.identities):
+            if i.account_type == account_type and i.database_id == database_id:
+                # Update password_hash in identity
+                self.identities[idx] = StoredIdentity(
+                    database_id=i.database_id,
+                    email=i.email,
+                    password_hash=password_hash,
+                    account_type=i.account_type,
+                    name=i.name,
+                    farm_id=i.farm_id,
+                    enterprise_id=i.enterprise_id,
+                    first_access=i.first_access,
+                )
+                return True
+        return False
+
 
 
 class FakeEmailOtpServiceForReset:
@@ -264,18 +281,15 @@ def test_service_verify_code_invalid_raises():
 
 def test_service_confirm_reset_success_farm_owner():
     settings = make_settings()
-    repo = FakeIdentityRepo([])
+    identity = StoredIdentity(
+        database_id=10,
+        email="produtor@fazenda.com.br",
+        password_hash="old-hash",
+        account_type=AccountType.FARM_OWNER,
+    )
+    repo = FakeIdentityRepo([identity])
     otp_service = FakeEmailOtpServiceForReset()
-
-    recorded_requests = []
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorded_requests.append(request)
-        if request.url.path == "/farm-owners/10" and request.method == "PATCH":
-            return httpx.Response(200, json={"id": 10, "email": "produtor@fazenda.com.br"})
-        return httpx.Response(404)
-
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
+    service = PasswordResetService(settings, repo, otp_service)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
@@ -285,28 +299,22 @@ def test_service_confirm_reset_success_farm_owner():
         )
     )
     assert resp.message == "Senha redefinida com sucesso."
-    assert len(recorded_requests) == 1
-
-    # Validate header and body sent to Spring
-    request = recorded_requests[0]
-    assert request.headers["authorization"].startswith("Bearer ")
-    assert b"NovaSenhaForte@2026" in request.content
+    updated_user = asyncio.run(repo.find_by_external_id(AccountType.FARM_OWNER, 10))
+    assert updated_user is not None
+    assert updated_user.password_hash.startswith("$2b$12$")
 
 
 def test_service_confirm_reset_success_company_employee():
     settings = make_settings()
-    repo = FakeIdentityRepo([])
+    identity = StoredIdentity(
+        database_id=88,
+        email="func@empresa.com.br",
+        password_hash="old-hash",
+        account_type=AccountType.COMPANY_EMPLOYEE,
+    )
+    repo = FakeIdentityRepo([identity])
     otp_service = FakeEmailOtpServiceForReset()
-
-    recorded_requests = []
-    def handler(request: httpx.Request) -> httpx.Response:
-        recorded_requests.append(request)
-        if request.url.path == "/company-employees/88" and request.method == "PATCH":
-            return httpx.Response(200, json={"id": 88, "email": "func@empresa.com.br"})
-        return httpx.Response(404)
-
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
+    service = PasswordResetService(settings, repo, otp_service)
 
     reset_token = service._mint_reset_token("func@empresa.com.br", "company_employee", 88)
 
@@ -316,17 +324,22 @@ def test_service_confirm_reset_success_company_employee():
         )
     )
     assert resp.message == "Senha redefinida com sucesso."
-    assert len(recorded_requests) == 1
+    updated_user = asyncio.run(repo.find_by_external_id(AccountType.COMPANY_EMPLOYEE, 88))
+    assert updated_user is not None
+    assert updated_user.password_hash.startswith("$2b$12$")
 
 
 def test_service_confirm_reset_replay_token_rejected():
     settings = make_settings()
-    repo = FakeIdentityRepo([])
-    otp_service = FakeEmailOtpServiceForReset()
-    mock_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"id": 10}))
+    identity = StoredIdentity(
+        database_id=10,
+        email="produtor@fazenda.com.br",
+        password_hash="old-hash",
+        account_type=AccountType.FARM_OWNER,
     )
-    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
+    repo = FakeIdentityRepo([identity])
+    otp_service = FakeEmailOtpServiceForReset()
+    service = PasswordResetService(settings, repo, otp_service)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
@@ -347,25 +360,23 @@ def test_service_confirm_reset_replay_token_rejected():
         asyncio.run(coro_replay)
 
 
-def test_service_confirm_reset_spring_error():
+def test_service_confirm_reset_user_not_found_in_database():
     settings = make_settings()
-    repo = FakeIdentityRepo([])
+    repo = FakeIdentityRepo([])  # empty repo
     otp_service = FakeEmailOtpServiceForReset()
-    mock_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(500, text="Internal error"))
-    )
-    service = PasswordResetService(settings, repo, otp_service, http_client=mock_client)
+    service = PasswordResetService(settings, repo, otp_service)
 
-    reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
+    reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 999)
 
     err_req = PasswordResetConfirmRequest(
         reset_token=reset_token,
         new_password=SecretStr("NovaSenhaForte@2026"),
     )
     coro_err = service.confirm_reset(err_req)
-    with pytest.raises(PasswordResetSpringError) as exc_info:
+    with pytest.raises(PasswordResetTokenInvalidError) as exc_info:
         asyncio.run(coro_err)
-    assert exc_info.value.status_code == 502
+    assert "Usuário não encontrado" in str(exc_info.value)
+
 
 
 # ---------------- API Route Integration Tests ----------------
@@ -503,17 +514,18 @@ def test_api_route_verify_password_reset_attempts_exceeded():
 
 
 def test_api_route_confirm_password_reset_success():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/farm-owners/10" and request.method == "PATCH":
-            return httpx.Response(200, json={"id": 10, "email": "produtor@fazenda.com.br"})
-        return httpx.Response(404)
-
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     cfg = make_settings()
+    identity = StoredIdentity(
+        database_id=10,
+        email="produtor@fazenda.com.br",
+        password_hash="old-hash",
+        account_type=AccountType.FARM_OWNER,
+    )
+    repo = FakeIdentityRepo([identity])
     otp = FakeEmailOtpServiceForReset()
-    client, _ = build_test_client(settings=cfg, otp_service=otp, http_client=mock_client)
+    client, _ = build_test_client(settings=cfg, identity_repo=repo, otp_service=otp)
 
-    service = PasswordResetService(cfg, FakeIdentityRepo([]), otp)
+    service = PasswordResetService(cfg, repo, otp)
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
     resp = client.post(
@@ -525,6 +537,9 @@ def test_api_route_confirm_password_reset_success():
     )
     assert resp.status_code == 200
     assert resp.json()["message"] == "Senha redefinida com sucesso."
+    updated_user = asyncio.run(repo.find_by_external_id(AccountType.FARM_OWNER, 10))
+    assert updated_user is not None
+    assert updated_user.password_hash.startswith("$2b$12$")
 
 
 def test_api_route_confirm_password_reset_weak_password():
@@ -539,16 +554,14 @@ def test_api_route_confirm_password_reset_weak_password():
     assert resp.status_code == 422
 
 
-def test_api_route_confirm_password_reset_spring_error():
-    mock_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(502, text="Bad Gateway"))
-    )
+def test_api_route_confirm_password_reset_user_not_found():
     cfg = make_settings()
+    repo = FakeIdentityRepo([])
     otp = FakeEmailOtpServiceForReset()
-    client, _ = build_test_client(settings=cfg, otp_service=otp, http_client=mock_client)
+    client, _ = build_test_client(settings=cfg, identity_repo=repo, otp_service=otp)
 
-    service = PasswordResetService(cfg, FakeIdentityRepo([]), otp)
-    reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
+    service = PasswordResetService(cfg, repo, otp)
+    reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 999)
 
     resp = client.post(
         "/v1/auth/password/reset/confirm",
@@ -557,7 +570,9 @@ def test_api_route_confirm_password_reset_spring_error():
             "new_password": "NovaSenhaForte@2026",
         },
     )
-    assert resp.status_code == 502
+    assert resp.status_code == 400
+    assert "Usuário não encontrado" in resp.json()["detail"]
+
 
 
 class FakeAsyncRedis:
@@ -739,64 +754,23 @@ def test_password_reset_invalid_tokens_and_roles() -> None:
         asyncio.run(coro_weak)
 
 
-def test_password_reset_spring_error_variants() -> None:
-    # Spring 400 with invalid json body
-    mock_client_400 = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(400, text="not json"))
-    )
-    service_400 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_400)
-    token = service_400._mint_reset_token("u@f.com", "farm_owner", 1)
-    req_400 = PasswordResetConfirmRequest(
+def test_password_reset_database_error_releases_token() -> None:
+    class ErrorIdentityRepo(FakeIdentityRepo):
+        async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
+            raise RuntimeError("Database connection lost")
+
+    service = PasswordResetService(make_settings(), ErrorIdentityRepo([]), FakeEmailOtpServiceForReset())
+    token = service._mint_reset_token("u@f.com", "farm_owner", 1)
+    req = PasswordResetConfirmRequest(
         reset_token=token,
         new_password=SecretStr("NovaSenhaForte@2026"),
     )
-    coro_400 = service_400.confirm_reset(req_400)
-    with pytest.raises(PasswordResetSpringError) as exc_400:
-        asyncio.run(coro_400)
-    assert exc_400.value.status_code == 400
+    with pytest.raises(RuntimeError, match="Database connection lost"):
+        asyncio.run(service.confirm_reset(req))
 
-    # Spring 404
-    mock_client_404 = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(404))
-    )
-    service_404 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_404)
-    req_404 = PasswordResetConfirmRequest(
-        reset_token=token,
-        new_password=SecretStr("NovaSenhaForte@2026"),
-    )
-    coro_404 = service_404.confirm_reset(req_404)
-    with pytest.raises(PasswordResetSpringError) as exc_404:
-        asyncio.run(coro_404)
-    assert exc_404.value.status_code == 404
+    # Token should be released from blacklist on failure
+    assert service._blacklist_memory.get(service._verify_reset_token(token)["jti"]) is None
 
-    # Spring 401/403
-    mock_client_401 = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(401))
-    )
-    service_401 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_401)
-    req_401 = PasswordResetConfirmRequest(
-        reset_token=token,
-        new_password=SecretStr("NovaSenhaForte@2026"),
-    )
-    coro_401 = service_401.confirm_reset(req_401)
-    with pytest.raises(PasswordResetSpringError) as exc_401:
-        asyncio.run(coro_401)
-    assert exc_401.value.status_code == 502
-
-    # Network connection error
-    def network_error_handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
-
-    mock_client_err = httpx.AsyncClient(transport=httpx.MockTransport(network_error_handler))
-    service_err = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client_err)
-    req_err = PasswordResetConfirmRequest(
-        reset_token=token,
-        new_password=SecretStr("NovaSenhaForte@2026"),
-    )
-    coro_err = service_err.confirm_reset(req_err)
-    with pytest.raises(PasswordResetSpringError) as exc_err:
-        asyncio.run(coro_err)
-    assert exc_err.value.status_code == 502
 
 
 def test_password_reset_redis_blacklist_operations() -> None:
@@ -890,22 +864,28 @@ def test_start_reset_otp_unavailable_returns_generic_response(caplog):
     assert "password_reset_challenge_unavailable" in caplog.text
 
 
-def test_concurrent_confirmations_only_patch_once(reset_backend_url):
+def test_concurrent_confirmations_only_update_once(reset_backend_url):
     async def run():
-        entered_patch = asyncio.Event()
-        release_patch = asyncio.Event()
-        calls = []
+        entered_update = asyncio.Event()
+        release_update = asyncio.Event()
+        update_calls = []
 
-        async def handler(request):
-            calls.append(request)
-            entered_patch.set()
-            await release_patch.wait()
-            return httpx.Response(200)
+        class SlowIdentityRepo(FakeIdentityRepo):
+            async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
+                update_calls.append((account_type, database_id, password_hash))
+                entered_update.set()
+                await release_update.wait()
+                return await super().update_password(account_type, database_id, password_hash)
 
+        identity = StoredIdentity(
+            database_id=1, email="user@example.com", password_hash="old-hash",
+            account_type=AccountType.FARM_OWNER,
+        )
+        repo = SlowIdentityRepo([identity])
         service = PasswordResetService(
-            make_settings(redis_url=reset_backend_url), FakeIdentityRepo([]),
+            make_settings(redis_url=reset_backend_url),
+            repo,
             FakeEmailOtpServiceForReset(),
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         request = PasswordResetConfirmRequest(
             reset_token=service._mint_reset_token("user@example.com", "farm_owner", 1),
@@ -913,66 +893,56 @@ def test_concurrent_confirmations_only_patch_once(reset_backend_url):
         )
         first = asyncio.create_task(service.confirm_reset(request))
         try:
-            await asyncio.wait_for(entered_patch.wait(), timeout=2)
-            # The first PATCH remains blocked while a competing confirmation runs.
+            await asyncio.wait_for(entered_update.wait(), timeout=2)
+            # The first update remains in-flight while a competing confirmation runs.
             with pytest.raises(PasswordResetTokenInvalidError):
                 await asyncio.wait_for(service.confirm_reset(request), timeout=2)
         finally:
-            release_patch.set()
+            release_update.set()
             result = await first
             await service.close()
         assert result.message == "Senha redefinida com sucesso."
-        assert len(calls) == 1
+        assert len(update_calls) == 1
 
     asyncio.run(run())
 
 
-def test_failed_patch_releases_reservation_for_retry(reset_backend_url):
+def test_failed_update_releases_reservation_for_retry(reset_backend_url):
     async def run():
-        calls = []
+        update_calls = []
 
-        def handler(request):
-            calls.append(request)
-            return httpx.Response(502 if len(calls) == 1 else 200)
+        class FailingFirstIdentityRepo(FakeIdentityRepo):
+            async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
+                update_calls.append((account_type, database_id, password_hash))
+                if len(update_calls) == 1:
+                    raise RuntimeError("database transient error")
+                return await super().update_password(account_type, database_id, password_hash)
 
+        identity = StoredIdentity(
+            database_id=1, email="user@example.com", password_hash="old-hash",
+            account_type=AccountType.FARM_OWNER,
+        )
+        repo = FailingFirstIdentityRepo([identity])
         service = PasswordResetService(
-            make_settings(redis_url=reset_backend_url), FakeIdentityRepo([]),
+            make_settings(redis_url=reset_backend_url),
+            repo,
             FakeEmailOtpServiceForReset(),
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         request = PasswordResetConfirmRequest(
             reset_token=service._mint_reset_token("user@example.com", "farm_owner", 1),
             new_password="ValidPass1!",
         )
         try:
-            with pytest.raises(PasswordResetSpringError):
+            with pytest.raises(RuntimeError, match="database transient error"):
                 await service.confirm_reset(request)
+            # Second attempt succeeds because reservation was released on failure
             await service.confirm_reset(request)
+            # Third attempt fails because token was successfully consumed and kept in blacklist
             with pytest.raises(PasswordResetTokenInvalidError):
                 await service.confirm_reset(request)
-            assert len(calls) == 2
+            assert len(update_calls) == 2
         finally:
             await service.close()
 
     asyncio.run(run())
 
-
-@pytest.mark.parametrize("body", [
-    '{"detail":"private database constraint"}', '{"detail":{"internal":"trace"}}',
-    '{}', 'null', '[]', '"private error"', 'not json', '',
-])
-def test_spring_bad_request_detail_is_not_exposed(body, caplog):
-    mock_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(400, text=body))
-    )
-    cfg = make_settings()
-    client, _ = build_test_client(settings=cfg, http_client=mock_client)
-    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    response = client.post("/v1/auth/password/reset/confirm", json={
-        "reset_token": service._mint_reset_token("user@example.com", "farm_owner", 1),
-        "new_password": "ValidPass1!",
-    })
-    assert response.status_code == 400
-    assert response.json() == {"detail": "Dados da requisição inválidos na API de negócio."}
-    if "private database constraint" in body:
-        assert "private database constraint" in caplog.text

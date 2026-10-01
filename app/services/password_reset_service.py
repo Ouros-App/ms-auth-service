@@ -12,10 +12,10 @@ from redis.exceptions import RedisError
 from app.core.config import Settings
 from app.core.errors import (
     EmailOtpUnavailable,
-    PasswordResetSpringError,
     PasswordResetTokenInvalidError,
     PasswordResetUnavailable,
 )
+from app.core.security import hash_password
 from app.models.identity import AccountType
 from app.repositories.identity_repository import IdentityRepository
 from app.schemas.auth import (
@@ -178,27 +178,29 @@ class PasswordResetService:
                 "uma letra maiúscula, uma minúscula, um número e um caractere especial"
             )
 
-        email = claims["sub"]
         account_type = claims["account_type"]
         database_id = int(claims["database_id"])
+        try:
+            account_type_enum = AccountType(account_type)
+        except ValueError as exc:
+            raise PasswordResetTokenInvalidError("Tipo de conta inválido para redefinição.") from exc
 
-        delegation_jwt = self._mint_spring_delegation_jwt(
-            email=email,
-            account_type=account_type,
-            database_id=database_id,
-        )
+        if account_type_enum not in (AccountType.FARM_OWNER, AccountType.COMPANY_EMPLOYEE):
+            raise PasswordResetTokenInvalidError("Tipo de conta inválido para redefinição.")
 
         now = int(time.time())
         exp = int(claims["exp"])
         remaining_ttl = max(exp - now, 1)
         await self._reserve_token(jti, remaining_ttl)
         try:
-            await self._call_spring_patch(
-                account_type=account_type,
+            password_hash = hash_password(raw_password)
+            updated = await self._identity_repository.update_password(
+                account_type=account_type_enum,
                 database_id=database_id,
-                new_password=raw_password,
-                delegation_jwt=delegation_jwt,
+                password_hash=password_hash,
             )
+            if not updated:
+                raise PasswordResetTokenInvalidError("Usuário não encontrado para redefinição de senha.")
         except Exception:
             await self._release_token(jti)
             raise
@@ -243,103 +245,6 @@ class PasswordResetService:
 
         return claims
 
-    def _mint_spring_delegation_jwt(
-        self,
-        email: str,
-        account_type: str,
-        database_id: int,
-    ) -> str:
-        """Mint a delegation JWT recognized by ms-spring-api JwtAuthFilter."""
-        now = int(time.time())
-        role = "FARM_OWNER" if account_type == "farm_owner" else "COMPANY_EMPLOYEE"
-        payload = {
-            "sub": email,
-            "id": database_id,
-            "role": role,
-            "iat": now,
-            "exp": now + 120,
-        }
-        return jwt.encode(payload, self._get_spring_jwt_secret(), algorithm="HS256")
-
-    async def _call_spring_patch(
-        self,
-        account_type: str,
-        database_id: int,
-        new_password: str,
-        delegation_jwt: str,
-    ) -> None:
-        """Execute PATCH on the corresponding ms-spring-api entity endpoint."""
-        base_url = self._settings.ms_spring_api_url.rstrip("/")
-        if account_type == "farm_owner":
-            endpoint = f"{base_url}/farm-owners/{database_id}"
-        elif account_type == "company_employee":
-            endpoint = f"{base_url}/company-employees/{database_id}"
-        else:
-            raise PasswordResetTokenInvalidError("Tipo de conta inválido para redefinição.")
-
-        headers = {
-            "Authorization": f"Bearer {delegation_jwt}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        payload = {"password": new_password}
-
-        client = self._http_client or httpx.AsyncClient(
-            timeout=self._settings.ms_spring_api_timeout_seconds
-        )
-        should_close_client = self._http_client is None
-
-        try:
-            response = await client.patch(
-                endpoint,
-                json=payload,
-                headers=headers,
-            )
-        except (httpx.RequestError, OSError) as exc:
-            logger.warning(
-                "password_reset_spring_connection_error url=%s error=%s",
-                endpoint,
-                str(exc),
-            )
-            raise PasswordResetSpringError(
-                "Não foi possível conectar ao serviço de atualização de senha.",
-                status_code=502,
-            ) from exc
-        finally:
-            if should_close_client:
-                await client.aclose()
-
-        if response.status_code == 200:
-            return
-
-        logger.warning(
-            "password_reset_spring_response_failed status=%d url=%s body=%s",
-            response.status_code,
-            endpoint,
-            response.text[:255],
-        )
-
-        if response.status_code == 400:
-            try:
-                body = response.json()
-                detail = body.get("detail") if isinstance(body, dict) else None
-            except ValueError:
-                detail = None
-            logger.warning("password_reset_spring_bad_request detail=%r", detail)
-            raise PasswordResetSpringError(
-                "Dados da requisição inválidos na API de negócio.", status_code=400
-            )
-
-        if response.status_code == 404:
-            raise PasswordResetSpringError("Usuário não encontrado na API de negócio.", status_code=404)
-
-        if response.status_code in (401, 403):
-            raise PasswordResetSpringError("Falha de autorização na API de negócio.", status_code=502)
-
-        raise PasswordResetSpringError(
-            "Erro retornado pela API de negócio.",
-            status_code=502,
-        )
 
     async def _redis_client(self) -> Redis:
         if self._redis_url is None:
