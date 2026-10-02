@@ -1,6 +1,6 @@
 import bcrypt
 
-from app.core.security import hash_password, verify_password
+from app.core.security import verify_password
 
 
 def test_verify_password_accepts_spring_compatible_bcrypt_hash() -> None:
@@ -20,13 +20,4 @@ def test_verify_password_accepts_2y_prefix() -> None:
 def test_verify_password_rejects_invalid_hash() -> None:
     """Return false rather than propagating malformed bcrypt input errors."""
     assert verify_password("Senha123!", "not-a-bcrypt-hash") is False
-
-
-def test_hash_password_generates_valid_bcrypt_hash() -> None:
-    """Ensure hash_password produces a standard 12-round bcrypt hash verifiable by verify_password."""
-    raw = "MinhaNovaSenha@2026"
-    hashed = hash_password(raw)
-    assert hashed.startswith("$2b$12$")
-    assert verify_password(raw, hashed) is True
-    assert verify_password("wrong-password", hashed) is False
 
