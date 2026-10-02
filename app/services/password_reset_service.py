@@ -15,7 +15,6 @@ from app.core.errors import (
     PasswordResetTokenInvalidError,
     PasswordResetUnavailable,
 )
-from app.core.security import hash_password
 from app.models.identity import AccountType
 from app.repositories.identity_repository import IdentityRepository
 from app.schemas.auth import (
@@ -67,6 +66,8 @@ class PasswordResetService:
         for secret in (
             self._settings.password_reset_jwt_secret,
             self._settings.ouros_email_otp_hmac_secret,
+            self._settings.internal_service_secret,
+            self._settings.internal_service_key,
             self._settings.spring_jwt_secret,
         ):
             if secret is not None and len(secret.get_secret_value()) >= 32:
@@ -74,14 +75,18 @@ class PasswordResetService:
         for secret in (
             self._settings.password_reset_jwt_secret,
             self._settings.ouros_email_otp_hmac_secret,
+            self._settings.internal_service_secret,
+            self._settings.internal_service_key,
             self._settings.spring_jwt_secret,
         ):
             if secret is not None and secret.get_secret_value():
                 return secret.get_secret_value()
         return "ouros-dev-password-reset-secret-key-32-chars-minimum"
 
-    def _get_spring_jwt_secret(self) -> str:
+    def _get_internal_service_secret(self) -> str:
         for secret in (
+            self._settings.internal_service_secret,
+            self._settings.internal_service_key,
             self._settings.spring_jwt_secret,
             self._settings.password_reset_jwt_secret,
             self._settings.ouros_email_otp_hmac_secret,
@@ -89,13 +94,15 @@ class PasswordResetService:
             if secret is not None and len(secret.get_secret_value()) >= 32:
                 return secret.get_secret_value()
         for secret in (
+            self._settings.internal_service_secret,
+            self._settings.internal_service_key,
             self._settings.spring_jwt_secret,
             self._settings.password_reset_jwt_secret,
             self._settings.ouros_email_otp_hmac_secret,
         ):
             if secret is not None and secret.get_secret_value():
                 return secret.get_secret_value()
-        return "ouros-dev-spring-delegation-secret-key-32-chars-minimum"
+        return "ouros-dev-internal-service-secret-key-32-chars-minimum"
 
     async def start_reset(
         self,
@@ -193,19 +200,67 @@ class PasswordResetService:
         remaining_ttl = max(exp - now, 1)
         await self._reserve_token(jti, remaining_ttl)
         try:
-            password_hash = hash_password(raw_password)
-            updated = await self._identity_repository.update_password(
-                account_type=account_type_enum,
+            await self._call_spring_internal_reset(
+                account_type=account_type_enum.value,
                 database_id=database_id,
-                password_hash=password_hash,
+                new_password=raw_password,
             )
-            if not updated:
-                raise PasswordResetTokenInvalidError("Usuário não encontrado para redefinição de senha.")
         except Exception:
             await self._release_token(jti)
             raise
 
         return PasswordResetConfirmResponse(message="Senha redefinida com sucesso.")
+
+    async def _call_spring_internal_reset(
+        self,
+        account_type: str,
+        database_id: int,
+        new_password: str,
+    ) -> None:
+        """Call internal password reset endpoint on ms-spring-api using X-Internal-Service-Key."""
+        endpoint = f"{self._settings.ms_spring_api_url.rstrip('/')}/internal/v1/password-reset"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Internal-Service-Key": self._get_internal_service_secret(),
+        }
+        payload = {
+            "accountType": account_type,
+            "id": database_id,
+            "newPassword": new_password,
+        }
+        client = self._http_client
+        close_after = False
+        if client is None:
+            client = httpx.AsyncClient(timeout=self._settings.ms_spring_api_timeout_seconds)
+            close_after = True
+
+        try:
+            response = await client.post(endpoint, json=payload, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            logger.error("spring_internal_reset_network_error: %s", exc)
+            raise PasswordResetUnavailable("Serviço de redefinição de senha temporariamente indisponível.") from exc
+        finally:
+            if close_after:
+                await client.aclose()
+
+        if response.status_code == 200:
+            return
+
+        if response.status_code == 404:
+            logger.warning("spring_internal_reset_not_found: %s id=%s", account_type, database_id)
+            raise PasswordResetTokenInvalidError("Usuário não encontrado para redefinição de senha.")
+
+        if response.status_code == 400:
+            logger.warning("spring_internal_reset_bad_request: status=400 text=%s", response.text)
+            raise PasswordResetTokenInvalidError("Dados inválidos para redefinição de senha.")
+
+        if response.status_code == 401:
+            logger.error("spring_internal_reset_unauthorized: verifique INTERNAL_SERVICE_SECRET")
+            raise PasswordResetUnavailable("Erro de autenticação interna entre serviços.")
+
+        logger.error("spring_internal_reset_unexpected_status: %s body=%s", response.status_code, response.text)
+        raise PasswordResetUnavailable("Serviço de redefinição de senha temporariamente indisponível.")
 
     def _mint_reset_token(
         self,

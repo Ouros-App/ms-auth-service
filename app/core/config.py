@@ -61,6 +61,8 @@ class Settings(BaseSettings):
 
     ms_spring_api_url: str = "https://ms-spring-api.discloud.app"
     ms_spring_api_timeout_seconds: float = Field(default=10.0, gt=0)
+    internal_service_secret: SecretStr | None = None
+    internal_service_key: SecretStr | None = None
     spring_jwt_secret: SecretStr | None = None
     password_reset_jwt_secret: SecretStr | None = None
     password_reset_token_ttl_seconds: int = Field(default=600, ge=60, le=3600)

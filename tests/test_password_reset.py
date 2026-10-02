@@ -1,4 +1,5 @@
 import asyncio
+import json
 import secrets
 import time
 from unittest.mock import patch
@@ -36,6 +37,7 @@ def make_settings(**kwargs) -> Settings:
         "ouros_email_otp_hmac_secret": SecretStr("test-hmac-secret-at-least-32-chars-long"),
         "ouros_smtp_host": "smtp.example.com",
         "ms_spring_api_url": "https://ms-spring-api.test",
+        "internal_service_secret": SecretStr("test-internal-service-secret-32-chars-long"),
         "spring_jwt_secret": SecretStr("test-spring-jwt-secret-at-least-32-chars"),
         "password_reset_jwt_secret": SecretStr("test-reset-jwt-secret-at-least-32-chars"),
         "password_reset_token_ttl_seconds": 600,
@@ -59,23 +61,6 @@ class FakeIdentityRepo:
             if i.account_type == account_type and i.database_id == database_id:
                 return i
         return None
-
-    async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
-        for idx, i in enumerate(self.identities):
-            if i.account_type == account_type and i.database_id == database_id:
-                # Update password_hash in identity
-                self.identities[idx] = StoredIdentity(
-                    database_id=i.database_id,
-                    email=i.email,
-                    password_hash=password_hash,
-                    account_type=i.account_type,
-                    name=i.name,
-                    farm_id=i.farm_id,
-                    enterprise_id=i.enterprise_id,
-                    first_access=i.first_access,
-                )
-                return True
-        return False
 
 
 
@@ -281,15 +266,20 @@ def test_service_verify_code_invalid_raises():
 
 def test_service_confirm_reset_success_farm_owner():
     settings = make_settings()
-    identity = StoredIdentity(
-        database_id=10,
-        email="produtor@fazenda.com.br",
-        password_hash="old-hash",
-        account_type=AccountType.FARM_OWNER,
-    )
-    repo = FakeIdentityRepo([identity])
-    otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+    recorded = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        assert request.url.path == "/internal/v1/password-reset"
+        assert request.headers.get("x-internal-service-key") == "test-internal-service-secret-32-chars-long"
+        body = json.loads(request.content.decode())
+        assert body["accountType"] == "farm_owner"
+        assert body["id"] == 10
+        assert body["newPassword"] == "NovaSenhaForte@2026"
+        return httpx.Response(200, json={"message": "ok"})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PasswordResetService(settings, FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
@@ -299,22 +289,25 @@ def test_service_confirm_reset_success_farm_owner():
         )
     )
     assert resp.message == "Senha redefinida com sucesso."
-    updated_user = asyncio.run(repo.find_by_external_id(AccountType.FARM_OWNER, 10))
-    assert updated_user is not None
-    assert updated_user.password_hash.startswith("$2b$12$")
+    assert len(recorded) == 1
 
 
 def test_service_confirm_reset_success_company_employee():
     settings = make_settings()
-    identity = StoredIdentity(
-        database_id=88,
-        email="func@empresa.com.br",
-        password_hash="old-hash",
-        account_type=AccountType.COMPANY_EMPLOYEE,
-    )
-    repo = FakeIdentityRepo([identity])
-    otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+    recorded = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        assert request.url.path == "/internal/v1/password-reset"
+        assert request.headers.get("x-internal-service-key") == "test-internal-service-secret-32-chars-long"
+        body = json.loads(request.content.decode())
+        assert body["accountType"] == "company_employee"
+        assert body["id"] == 88
+        assert body["newPassword"] == "NovaSenhaForte@2026"
+        return httpx.Response(200, json={"message": "ok"})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PasswordResetService(settings, FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client)
 
     reset_token = service._mint_reset_token("func@empresa.com.br", "company_employee", 88)
 
@@ -324,22 +317,13 @@ def test_service_confirm_reset_success_company_employee():
         )
     )
     assert resp.message == "Senha redefinida com sucesso."
-    updated_user = asyncio.run(repo.find_by_external_id(AccountType.COMPANY_EMPLOYEE, 88))
-    assert updated_user is not None
-    assert updated_user.password_hash.startswith("$2b$12$")
+    assert len(recorded) == 1
 
 
 def test_service_confirm_reset_replay_token_rejected():
     settings = make_settings()
-    identity = StoredIdentity(
-        database_id=10,
-        email="produtor@fazenda.com.br",
-        password_hash="old-hash",
-        account_type=AccountType.FARM_OWNER,
-    )
-    repo = FakeIdentityRepo([identity])
-    otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"message": "ok"})))
+    service = PasswordResetService(settings, FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
@@ -362,9 +346,8 @@ def test_service_confirm_reset_replay_token_rejected():
 
 def test_service_confirm_reset_user_not_found_in_database():
     settings = make_settings()
-    repo = FakeIdentityRepo([])  # empty repo
-    otp_service = FakeEmailOtpServiceForReset()
-    service = PasswordResetService(settings, repo, otp_service)
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(404, json={"detail": "Not found"})))
+    service = PasswordResetService(settings, FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client)
 
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 999)
 
@@ -515,17 +498,22 @@ def test_api_route_verify_password_reset_attempts_exceeded():
 
 def test_api_route_confirm_password_reset_success():
     cfg = make_settings()
-    identity = StoredIdentity(
-        database_id=10,
-        email="produtor@fazenda.com.br",
-        password_hash="old-hash",
-        account_type=AccountType.FARM_OWNER,
-    )
-    repo = FakeIdentityRepo([identity])
-    otp = FakeEmailOtpServiceForReset()
-    client, _ = build_test_client(settings=cfg, identity_repo=repo, otp_service=otp)
+    recorded_requests = []
 
-    service = PasswordResetService(cfg, repo, otp)
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append(request)
+        assert request.url.path == "/internal/v1/password-reset"
+        assert request.headers.get("x-internal-service-key") == "test-internal-service-secret-32-chars-long"
+        body = json.loads(request.content.decode())
+        assert body["accountType"] == "farm_owner"
+        assert body["id"] == 10
+        assert body["newPassword"] == "NovaSenhaForte@2026"
+        return httpx.Response(200, json={"message": "Senha atualizada com sucesso."})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client, _ = build_test_client(settings=cfg, http_client=mock_client)
+
+    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 10)
 
     resp = client.post(
@@ -537,9 +525,7 @@ def test_api_route_confirm_password_reset_success():
     )
     assert resp.status_code == 200
     assert resp.json()["message"] == "Senha redefinida com sucesso."
-    updated_user = asyncio.run(repo.find_by_external_id(AccountType.FARM_OWNER, 10))
-    assert updated_user is not None
-    assert updated_user.password_hash.startswith("$2b$12$")
+    assert len(recorded_requests) == 1
 
 
 def test_api_route_confirm_password_reset_weak_password():
@@ -556,11 +542,14 @@ def test_api_route_confirm_password_reset_weak_password():
 
 def test_api_route_confirm_password_reset_user_not_found():
     cfg = make_settings()
-    repo = FakeIdentityRepo([])
-    otp = FakeEmailOtpServiceForReset()
-    client, _ = build_test_client(settings=cfg, identity_repo=repo, otp_service=otp)
 
-    service = PasswordResetService(cfg, repo, otp)
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Usuário não encontrado"})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client, _ = build_test_client(settings=cfg, http_client=mock_client)
+
+    service = PasswordResetService(cfg, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
     reset_token = service._mint_reset_token("produtor@fazenda.com.br", "farm_owner", 999)
 
     resp = client.post(
@@ -643,6 +632,8 @@ def test_password_reset_jwt_secret_fallbacks() -> None:
         password_reset_jwt_secret=None,
         ouros_email_otp_enabled=False,
         ouros_email_otp_hmac_secret=None,
+        internal_service_secret=None,
+        internal_service_key=None,
         spring_jwt_secret=SecretStr("fallback-spring-secret-at-least-32-chars"),
     )
     svc3 = PasswordResetService(cfg3, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
@@ -653,47 +644,51 @@ def test_password_reset_jwt_secret_fallbacks() -> None:
         password_reset_jwt_secret=None,
         ouros_email_otp_enabled=False,
         ouros_email_otp_hmac_secret=None,
+        internal_service_secret=None,
+        internal_service_key=None,
         spring_jwt_secret=None,
     )
     svc4 = PasswordResetService(cfg4, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
     assert svc4._get_reset_jwt_secret() == "ouros-dev-password-reset-secret-key-32-chars-minimum"
 
 
-def test_password_reset_spring_secret_fallbacks() -> None:
-    # 1. When spring_jwt_secret is provided, it is used
+def test_password_reset_internal_service_secret_fallbacks() -> None:
+    # 1. When internal_service_secret is provided, it is used
     cfg1 = make_settings(
-        spring_jwt_secret=SecretStr("custom-spring-secret-at-least-32-chars"),
+        internal_service_secret=SecretStr("custom-internal-secret-at-least-32-chars"),
         password_reset_jwt_secret=SecretStr("fallback-reset-secret-at-least-32-chars"),
     )
     svc1 = PasswordResetService(cfg1, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    assert svc1._get_spring_jwt_secret() == "custom-spring-secret-at-least-32-chars"
+    assert svc1._get_internal_service_secret() == "custom-internal-secret-at-least-32-chars"
 
-    # 2. When spring_jwt_secret is absent, falls back to password_reset_jwt_secret
+    # 2. When internal_service_secret is absent, falls back to internal_service_key
     cfg2 = make_settings(
-        spring_jwt_secret=None,
-        password_reset_jwt_secret=SecretStr("fallback-reset-secret-at-least-32-chars"),
+        internal_service_secret=None,
+        internal_service_key=SecretStr("custom-key-secret-at-least-32-chars"),
     )
     svc2 = PasswordResetService(cfg2, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    assert svc2._get_spring_jwt_secret() == "fallback-reset-secret-at-least-32-chars"
+    assert svc2._get_internal_service_secret() == "custom-key-secret-at-least-32-chars"
 
-    # 3. When spring_jwt_secret and password_reset_jwt_secret are absent, falls back to ouros_email_otp_hmac_secret
+    # 3. Fallbacks to spring_jwt_secret
     cfg3 = make_settings(
-        spring_jwt_secret=None,
-        password_reset_jwt_secret=None,
-        ouros_email_otp_hmac_secret=SecretStr("fallback-hmac-secret-at-least-32-chars"),
+        internal_service_secret=None,
+        internal_service_key=None,
+        spring_jwt_secret=SecretStr("fallback-spring-secret-at-least-32-chars"),
     )
     svc3 = PasswordResetService(cfg3, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    assert svc3._get_spring_jwt_secret() == "fallback-hmac-secret-at-least-32-chars"
+    assert svc3._get_internal_service_secret() == "fallback-spring-secret-at-least-32-chars"
 
-    # 4. When all secrets are absent, falls back to dev default key
+    # 4. Fallback to dev default
     cfg4 = make_settings(
+        internal_service_secret=None,
+        internal_service_key=None,
         spring_jwt_secret=None,
         password_reset_jwt_secret=None,
         ouros_email_otp_enabled=False,
         ouros_email_otp_hmac_secret=None,
     )
     svc4 = PasswordResetService(cfg4, FakeIdentityRepo([]), FakeEmailOtpServiceForReset())
-    assert svc4._get_spring_jwt_secret() == "ouros-dev-spring-delegation-secret-key-32-chars-minimum"
+    assert svc4._get_internal_service_secret() == "ouros-dev-internal-service-secret-key-32-chars-minimum"
 
 
 @pytest.mark.parametrize("environment", ["production", "staging", "test", "development"])
@@ -754,22 +749,46 @@ def test_password_reset_invalid_tokens_and_roles() -> None:
         asyncio.run(coro_weak)
 
 
-def test_password_reset_database_error_releases_token() -> None:
-    class ErrorIdentityRepo(FakeIdentityRepo):
-        async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
-            raise RuntimeError("Database connection lost")
+def test_password_reset_spring_error_releases_token() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused", request=request)
 
-    service = PasswordResetService(make_settings(), ErrorIdentityRepo([]), FakeEmailOtpServiceForReset())
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PasswordResetService(
+        make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_client
+    )
     token = service._mint_reset_token("u@f.com", "farm_owner", 1)
     req = PasswordResetConfirmRequest(
         reset_token=token,
         new_password=SecretStr("NovaSenhaForte@2026"),
     )
-    with pytest.raises(RuntimeError, match="Database connection lost"):
+    with pytest.raises(PasswordResetUnavailable):
         asyncio.run(service.confirm_reset(req))
 
     # Token should be released from blacklist on failure
     assert service._blacklist_memory.get(service._verify_reset_token(token)["jti"]) is None
+
+
+def test_password_reset_spring_status_codes() -> None:
+    # 400 Bad Request
+    mock_400 = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(400, json={"detail": "Bad request"})))
+    service_400 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_400)
+    token = service_400._mint_reset_token("u@f.com", "farm_owner", 1)
+    req = PasswordResetConfirmRequest(reset_token=token, new_password=SecretStr("NovaSenhaForte@2026"))
+    with pytest.raises(PasswordResetTokenInvalidError, match="Dados inválidos"):
+        asyncio.run(service_400.confirm_reset(req))
+
+    # 401 Unauthorized
+    mock_401 = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(401, json={"detail": "Unauthorized"})))
+    service_401 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_401)
+    with pytest.raises(PasswordResetUnavailable, match="Erro de autenticação interna"):
+        asyncio.run(service_401.confirm_reset(req))
+
+    # 500 Internal Server Error
+    mock_500 = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(500, json={"detail": "Server error"})))
+    service_500 = PasswordResetService(make_settings(), FakeIdentityRepo([]), FakeEmailOtpServiceForReset(), http_client=mock_500)
+    with pytest.raises(PasswordResetUnavailable, match="temporariamente indisponível"):
+        asyncio.run(service_500.confirm_reset(req))
 
 
 
@@ -866,26 +885,22 @@ def test_start_reset_otp_unavailable_returns_generic_response(caplog):
 
 def test_concurrent_confirmations_only_update_once(reset_backend_url):
     async def run():
-        entered_update = asyncio.Event()
-        release_update = asyncio.Event()
-        update_calls = []
+        entered_call = asyncio.Event()
+        release_call = asyncio.Event()
+        calls = []
 
-        class SlowIdentityRepo(FakeIdentityRepo):
-            async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
-                update_calls.append((account_type, database_id, password_hash))
-                entered_update.set()
-                await release_update.wait()
-                return await super().update_password(account_type, database_id, password_hash)
+        async def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            entered_call.set()
+            await release_call.wait()
+            return httpx.Response(200, json={"message": "ok"})
 
-        identity = StoredIdentity(
-            database_id=1, email="user@example.com", password_hash="old-hash",
-            account_type=AccountType.FARM_OWNER,
-        )
-        repo = SlowIdentityRepo([identity])
+        mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         service = PasswordResetService(
             make_settings(redis_url=reset_backend_url),
-            repo,
+            FakeIdentityRepo([]),
             FakeEmailOtpServiceForReset(),
+            http_client=mock_client,
         )
         request = PasswordResetConfirmRequest(
             reset_token=service._mint_reset_token("user@example.com", "farm_owner", 1),
@@ -893,54 +908,50 @@ def test_concurrent_confirmations_only_update_once(reset_backend_url):
         )
         first = asyncio.create_task(service.confirm_reset(request))
         try:
-            await asyncio.wait_for(entered_update.wait(), timeout=2)
+            await asyncio.wait_for(entered_call.wait(), timeout=2)
             # The first update remains in-flight while a competing confirmation runs.
             with pytest.raises(PasswordResetTokenInvalidError):
                 await asyncio.wait_for(service.confirm_reset(request), timeout=2)
         finally:
-            release_update.set()
+            release_call.set()
             result = await first
             await service.close()
         assert result.message == "Senha redefinida com sucesso."
-        assert len(update_calls) == 1
+        assert len(calls) == 1
 
     asyncio.run(run())
 
 
 def test_failed_update_releases_reservation_for_retry(reset_backend_url):
     async def run():
-        update_calls = []
+        calls = []
 
-        class FailingFirstIdentityRepo(FakeIdentityRepo):
-            async def update_password(self, account_type, database_id: int, password_hash: str) -> bool:
-                update_calls.append((account_type, database_id, password_hash))
-                if len(update_calls) == 1:
-                    raise RuntimeError("database transient error")
-                return await super().update_password(account_type, database_id, password_hash)
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(500, text="internal server error")
+            return httpx.Response(200, json={"message": "ok"})
 
-        identity = StoredIdentity(
-            database_id=1, email="user@example.com", password_hash="old-hash",
-            account_type=AccountType.FARM_OWNER,
-        )
-        repo = FailingFirstIdentityRepo([identity])
+        mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         service = PasswordResetService(
             make_settings(redis_url=reset_backend_url),
-            repo,
+            FakeIdentityRepo([]),
             FakeEmailOtpServiceForReset(),
+            http_client=mock_client,
         )
         request = PasswordResetConfirmRequest(
             reset_token=service._mint_reset_token("user@example.com", "farm_owner", 1),
             new_password="ValidPass1!",
         )
         try:
-            with pytest.raises(RuntimeError, match="database transient error"):
+            with pytest.raises(PasswordResetUnavailable):
                 await service.confirm_reset(request)
             # Second attempt succeeds because reservation was released on failure
             await service.confirm_reset(request)
             # Third attempt fails because token was successfully consumed and kept in blacklist
             with pytest.raises(PasswordResetTokenInvalidError):
                 await service.confirm_reset(request)
-            assert len(update_calls) == 2
+            assert len(calls) == 2
         finally:
             await service.close()
 
