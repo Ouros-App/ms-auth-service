@@ -22,6 +22,7 @@ REQUIRED_FIRST_PARTY_AUDIENCES = frozenset(
         "ms-ai-server",
         "ms-ai-server-mcp-exchange",
         "ms-mcp-server-ouros-knowledge-codemode",
+        "ms-ouros-audience-engine",
     }
 )
 

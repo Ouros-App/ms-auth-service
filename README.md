@@ -112,7 +112,7 @@ When `REDIS_URL` is configured, counters live in Redis and are shared across rep
 - The API does not log passwords and Pydantic represents the request password as `SecretStr`.
 - No JWT is generated locally in this service.
 - Tokens returned by `/v1/auth/token` are locally verified before leaving the service.
-- A broker token must contain every first-party audience and a valid `database_id` + `account_type` whose realm role matches.
+- A broker token must contain every first-party audience, including `ms-ouros-audience-engine`, and a valid `database_id` + `account_type` whose realm role matches.
 
 ## Keycloak User Storage bridge
 
@@ -358,7 +358,7 @@ KEYCLOAK_TOKEN_BROKER_JWKS_URL=
 
 ### Rollout checklist
 
-1. Merge and deploy the Keycloak IaC change that creates `ms-auth-service-broker` with Direct Access Grants enabled only for that confidential client.
+1. Merge and deploy the Keycloak IaC change that reconciles `ms-auth-service-broker` as a confidential password-grant client and attaches the Audience Engine audience scope.
 2. Store the generated client secret in Infisical as `KEYCLOAK_TOKEN_BROKER_CLIENT_SECRET` for `ms-auth-service`.
 3. Merge and deploy the `ms-auth-service` token-broker change.
 4. Check `/ready` returns `200`.
