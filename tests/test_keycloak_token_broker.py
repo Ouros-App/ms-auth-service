@@ -33,6 +33,7 @@ def make_request() -> TokenLoginRequest:
 def test_broker_audiences_follow_delegated_mcp_boundary() -> None:
     """Require the exchange requester audience and reject direct Knowledge MCP access."""
     assert "ms-ai-server-mcp-exchange" in REQUIRED_FIRST_PARTY_AUDIENCES
+    assert "ms-ouros-audience-engine" in REQUIRED_FIRST_PARTY_AUDIENCES
     assert "ms-mcp-server-ouros-knowledge" not in REQUIRED_FIRST_PARTY_AUDIENCES
 
 
@@ -176,6 +177,7 @@ def test_broker_validates_full_ouros_token_contract() -> None:
         "ms-ai-server",
         "ms-ai-server-mcp-exchange",
         "ms-mcp-server-ouros-knowledge-codemode",
+        "ms-ouros-audience-engine",
     ]
     claims = {
         "sub": "keycloak-subject",
@@ -213,8 +215,14 @@ def test_broker_rejects_missing_resource_audience() -> None:
     claims = {
         "sub": "subject",
         "azp": "ms-auth-service-broker",
-        "aud": ["ms-ai-server"],
         "database_id": 42,
+        "aud": [
+            "ms-spring-api",
+            "ms-telemetry-dashboard-service",
+            "ms-ai-server",
+            "ms-ai-server-mcp-exchange",
+            "ms-mcp-server-ouros-knowledge-codemode",
+        ],
         "account_type": "farm_owner",
         "realm_access": {"roles": ["farm_owner"]},
     }
@@ -244,6 +252,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
                 "ms-ai-server",
                 "ms-ai-server-mcp-exchange",
                 "ms-mcp-server-ouros-knowledge-codemode",
+                "ms-ouros-audience-engine",
             ],
             "database_id": 0,
             "account_type": "farm_owner",
@@ -258,6 +267,7 @@ def test_broker_rejects_missing_resource_audience() -> None:
                 "ms-ai-server",
                 "ms-ai-server-mcp-exchange",
                 "ms-mcp-server-ouros-knowledge-codemode",
+                "ms-ouros-audience-engine",
             ],
             "database_id": 42,
             "account_type": "admin",
@@ -292,6 +302,7 @@ def test_broker_rejects_wrong_authorized_party() -> None:
             "ms-ai-server",
             "ms-ai-server-mcp-exchange",
             "ms-mcp-server-ouros-knowledge-codemode",
+            "ms-ouros-audience-engine",
         ],
         "database_id": 42,
         "account_type": "farm_owner",
@@ -323,6 +334,7 @@ def test_broker_rejects_non_string_account_type() -> None:
             "ms-ai-server",
             "ms-ai-server-mcp-exchange",
             "ms-mcp-server-ouros-knowledge-codemode",
+            "ms-ouros-audience-engine",
         ],
         "database_id": 42,
         "account_type": [],
@@ -377,6 +389,7 @@ def test_broker_accepts_numeric_database_id_encoded_as_string() -> None:
             "ms-ai-server",
             "ms-ai-server-mcp-exchange",
             "ms-mcp-server-ouros-knowledge-codemode",
+            "ms-ouros-audience-engine",
         ],
         "database_id": "42",
         "account_type": "farm_owner",
