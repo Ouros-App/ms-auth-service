@@ -37,7 +37,7 @@ FROM (
         email,
         password AS password_hash,
         'admin'::text AS account_type,
-        NULL::text AS name,
+        name::text AS name,
         NULL::bigint AS farm_id,
         NULL::bigint AS enterprise_id,
         NULL::boolean AS first_access
@@ -81,7 +81,7 @@ _FIND_BY_ID_SQL = {
             email,
             password AS password_hash,
             'admin'::text AS account_type,
-            NULL::text AS name,
+            name::text AS name,
             NULL::bigint AS farm_id,
             NULL::bigint AS enterprise_id,
             NULL::boolean AS first_access
@@ -140,4 +140,3 @@ class IdentityRepository:
         if row is None:
             return None
         return _row_to_identity(row)
-

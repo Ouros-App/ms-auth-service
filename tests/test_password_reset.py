@@ -957,3 +957,64 @@ def test_failed_update_releases_reservation_for_retry(reset_backend_url):
 
     asyncio.run(run())
 
+
+
+def test_api_route_full_web_password_reset_flow_company_employee():
+    cfg = make_settings()
+    recorded_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append(request)
+        assert request.url.path == "/internal/v1/password-reset"
+        assert request.headers.get("x-internal-service-key") == "test-internal-service-secret-32-chars-long"
+        body = json.loads(request.content.decode())
+        assert body["accountType"] == "company_employee"
+        assert body["id"] == 25
+        assert body["newPassword"] == "NovaSenhaWeb@2026"
+        return httpx.Response(200, json={"message": "Senha atualizada com sucesso."})
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    repo = FakeIdentityRepo(
+        [
+            StoredIdentity(
+                database_id=25,
+                email="colaborador@integradora.com.br",
+                password_hash="hash",
+                account_type=AccountType.COMPANY_EMPLOYEE,
+                name="Colaborador Web",
+                enterprise_id=3,
+            )
+        ]
+    )
+    client, otp = build_test_client(settings=cfg, identity_repo=repo, http_client=mock_client)
+
+    start_resp = client.post(
+        "/v1/auth/password/reset/start",
+        json={"email": "colaborador@integradora.com.br", "account_type": "company_employee"},
+    )
+    assert start_resp.status_code == 200
+    challenge_id = start_resp.json()["challenge_id"]
+    assert start_resp.json()["masked_email"] == "c***@integradora.com.br"
+    assert challenge_id in otp.challenges
+
+    verify_resp = client.post(
+        "/v1/auth/password/reset/verify",
+        json={
+            "challenge_id": challenge_id,
+            "email": "colaborador@integradora.com.br",
+            "code": "123456",
+        },
+    )
+    assert verify_resp.status_code == 200
+    reset_token = verify_resp.json()["reset_token"]
+
+    confirm_resp = client.post(
+        "/v1/auth/password/reset/confirm",
+        json={
+            "reset_token": reset_token,
+            "new_password": "NovaSenhaWeb@2026",
+        },
+    )
+    assert confirm_resp.status_code == 200
+    assert confirm_resp.json()["message"] == "Senha redefinida com sucesso."
+    assert len(recorded_requests) == 1
