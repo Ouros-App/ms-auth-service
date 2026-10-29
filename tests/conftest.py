@@ -14,8 +14,8 @@ from redis.exceptions import ConnectionError
 def reset_redis_url(tmp_path_factory):
     executable = shutil.which("redis-server") or shutil.which("redis6-server")
     if executable is None:
-        url = os.environ.get("TEST_REDIS_URL") or os.environ.get("REDIS_URL")
-        if url is None:
+        url = (os.environ.get("TEST_REDIS_URL") or os.environ.get("REDIS_URL") or "").strip()
+        if not url:
             pytest.skip("Real Redis requires redis-server or TEST_REDIS_URL")
         yield url
         return
