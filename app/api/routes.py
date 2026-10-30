@@ -25,6 +25,7 @@ from app.schemas.auth import (
     PasswordResetVerifyResponse,
     TokenLoginRequest,
     TokenRefreshRequest,
+    WebAccessTokenResponse,
 )
 from app.schemas.common import HealthResponse, ReadinessResponse
 from app.services.auth_service import AuthService
@@ -33,6 +34,7 @@ from app.services.keycloak_token_broker import KeycloakTokenBroker
 from app.services.password_reset_service import PasswordResetService
 
 router = APIRouter()
+WEB_REFRESH_COOKIE = "ouros_web_refresh"
 
 
 def get_auth_service(request: Request) -> AuthService:
@@ -114,6 +116,47 @@ def require_password_broker(settings: Settings) -> None:
     """Hide the legacy password broker after the PKCE + OTP cutover."""
     if not settings.keycloak_password_broker_enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
+def require_web_origin(request: Request, settings: Settings) -> None:
+    """Reject cookie-authenticated browser requests from untrusted origins."""
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if not origin or origin not in settings.web_allowed_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Origem não autorizada.",
+        )
+
+
+def set_web_refresh_cookie(
+    response: Response,
+    token: KeycloakTokenResponse,
+    settings: Settings,
+) -> None:
+    """Store the rotated refresh token in a browser-inaccessible cookie."""
+    if not token.refresh_token:
+        return
+    secure = settings.environment.lower() not in {"development", "dev", "local"}
+    response.set_cookie(
+        key=WEB_REFRESH_COOKIE,
+        value=token.refresh_token,
+        max_age=token.refresh_expires_in,
+        httponly=True,
+        secure=secure,
+        samesite="none" if secure else "lax",
+        path="/v1/auth/web",
+    )
+
+
+def web_access_token_response(token: KeycloakTokenResponse) -> WebAccessTokenResponse:
+    """Return access-token fields without exposing the refresh token to JavaScript."""
+    return WebAccessTokenResponse(
+        access_token=token.access_token,
+        expires_in=token.expires_in,
+        refresh_expires_in=token.refresh_expires_in,
+        token_type=token.token_type,
+        scope=token.scope,
+    )
 
 
 @router.get("/", tags=["meta"])
@@ -225,6 +268,82 @@ async def verify_native_login(
     return await token_broker.issue_password_token(
         TokenLoginRequest(email=payload.email, password=payload.password)
     )
+
+
+@router.post(
+    "/v1/auth/web/login/verify",
+    tags=["auth"],
+    summary="Verify web login code and create an HttpOnly refresh session",
+    response_model=WebAccessTokenResponse,
+)
+async def verify_web_login(
+    request: Request,
+    response: Response,
+    payload: NativeLoginVerifyRequest,
+    email_otp: EmailOtpDependency,
+    token_broker: TokenBrokerDependency,
+    settings: SettingsDependency,
+) -> WebAccessTokenResponse:
+    """Complete the web login while keeping the refresh token out of JavaScript."""
+    require_web_origin(request, settings)
+    await email_otp.verify(payload.challenge_id, payload.email, payload.code)
+    token = await token_broker.issue_password_token(
+        TokenLoginRequest(email=payload.email, password=payload.password)
+    )
+    set_web_refresh_cookie(response, token, settings)
+    return web_access_token_response(token)
+
+
+@router.post(
+    "/v1/auth/web/token/refresh",
+    tags=["auth"],
+    summary="Refresh a browser session from its HttpOnly cookie",
+    response_model=WebAccessTokenResponse,
+)
+async def refresh_web_session(
+    request: Request,
+    response: Response,
+    token_broker: TokenBrokerDependency,
+    settings: SettingsDependency,
+) -> WebAccessTokenResponse:
+    """Rotate the browser session cookie after validating the request origin."""
+    require_web_origin(request, settings)
+    refresh_token = request.cookies.get(WEB_REFRESH_COOKIE)
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sessão expirada. Faça login novamente.",
+        )
+    token = await token_broker.refresh_token(
+        TokenRefreshRequest(refresh_token=refresh_token)
+    )
+    set_web_refresh_cookie(response, token, settings)
+    return web_access_token_response(token)
+
+
+@router.post(
+    "/v1/auth/web/logout",
+    tags=["auth"],
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="End a browser session",
+)
+async def logout_web_session(
+    request: Request,
+    response: Response,
+    settings: SettingsDependency,
+) -> Response:
+    """Clear the refresh cookie for an allowed web origin."""
+    require_web_origin(request, settings)
+    secure = settings.environment.lower() not in {"development", "dev", "local"}
+    response.delete_cookie(
+        key=WEB_REFRESH_COOKIE,
+        httponly=True,
+        secure=secure,
+        samesite="none" if secure else "lax",
+        path="/v1/auth/web",
+    )
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
 
 
 @router.post(

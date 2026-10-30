@@ -43,6 +43,23 @@ class Settings(BaseSettings):
     keycloak_token_broker_timeout_seconds: float = Field(default=5.0, gt=0)
     keycloak_token_broker_jwks_url: str | None = None
 
+    # Exact browser origins allowed to use the cookie-backed web session routes.
+    # Keep this empty in production until the deployed frontend origin is configured.
+    ouros_web_allowed_origins: str = ""
+
+    @property
+    def web_allowed_origins(self) -> list[str]:
+        configured = [
+            origin.strip().rstrip("/")
+            for origin in self.ouros_web_allowed_origins.split(",")
+            if origin.strip()
+        ]
+        if configured:
+            return configured
+        if self.environment.lower() in {"development", "dev", "local"}:
+            return ["http://localhost:5173"]
+        return []
+
     ouros_email_otp_enabled: bool = False
     ouros_email_otp_hmac_secret: SecretStr | None = None
     ouros_email_otp_ttl_seconds: int = Field(default=300, ge=60, le=900)

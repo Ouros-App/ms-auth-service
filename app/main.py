@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.internal_routes import router as internal_router
 from app.api.routes import router
@@ -180,6 +181,15 @@ def create_app(
     application.state.email_otp_service = deps.email_otp_service
     application.state.password_reset_service = deps.password_reset_service
     application.state.settings = deps.settings
+
+    if deps.settings.web_allowed_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=deps.settings.web_allowed_origins,
+            allow_credentials=True,
+            allow_methods=["POST", "OPTIONS"],
+            allow_headers=["Content-Type"],
+        )
 
     @application.middleware("http")
     async def password_broker_cutover_guard(

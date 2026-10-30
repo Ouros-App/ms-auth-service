@@ -301,7 +301,7 @@ The token includes the federated identity claims issued by Keycloak, including `
 
 ### Client integration rules
 
-- **Web:** prefer a backend-for-frontend (BFF). Keep the refresh token server-side and expose an `HttpOnly`, `Secure`, `SameSite` session cookie to the browser.
+- **Web:** prefer a backend-for-frontend (BFF). The first-party SPA contract is `POST /v1/auth/web/login/verify`, `POST /v1/auth/web/token/refresh` and `POST /v1/auth/web/logout`. It sends the refresh token only as an `HttpOnly` cookie and returns the short-lived access token in JSON; the frontend must keep that access token in memory. Configure `OUROS_WEB_ALLOWED_ORIGINS` with the exact deployed frontend origin(s). Production cookies are `Secure` and `SameSite=None`; the local Vite proxy uses `http://localhost:5173`.
 - **Mobile:** store tokens only in the platform secure store (Android Keystore / iOS Keychain). Never use normal preferences or application logs.
 - **Server-to-server:** use Client Credentials instead of this endpoint; no user password should be involved.
 - **Public third-party integrations:** use Authorization Code + PKCE rather than the password broker.
@@ -321,6 +321,8 @@ Content-Type: application/json
 ```
 
 This endpoint is intended for trusted first-party backends/BFFs. Browsers should never receive or persist the refresh token in JavaScript-accessible storage. An expired or revoked refresh token returns a generic `401`; Keycloak/broker outages return `503`.
+
+The browser-only `/v1/auth/web/token/refresh` route reads the HttpOnly refresh cookie, checks the request `Origin` against `OUROS_WEB_ALLOWED_ORIGINS`, rotates the cookie and returns only the access token. `/v1/auth/web/logout` clears that cookie. Do not expose these routes with wildcard CORS or omit the production frontend origin from the allowlist.
 
 ### Errors and rate limits
 
