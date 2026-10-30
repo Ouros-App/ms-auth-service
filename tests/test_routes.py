@@ -125,11 +125,15 @@ def build_client(
     token_broker=None,
     email_otp_service=None,
     password_broker_enabled: bool = True,
+    environment: str = "development",
+    origins: str = "",
 ) -> TestClient:
     """Build an isolated app that never inherits CI Redis configuration."""
     settings = Settings(
         database_url="postgresql://unused",
         redis_url=None,
+        environment=environment,
+        ouros_web_allowed_origins=origins,
         keycloak_password_broker_enabled=password_broker_enabled,
     )
     database = FakeDatabase(ready=ready)
@@ -144,6 +148,48 @@ def build_client(
         email_otp_service=email_otp_service,  # type: ignore[arg-type]
     )
     return TestClient(app)
+
+
+def test_web_session_login_refresh_and_logout() -> None:
+    origin = {"Origin": "https://web.example.com"}
+    with build_client(environment="production", origins="https://web.example.com/") as client:
+        preflight = client.options("/v1/auth/web/token/refresh", headers={
+            **origin, "Access-Control-Request-Method": "POST"
+        })
+        assert preflight.headers["access-control-allow-credentials"] == "true"
+        login = client.post("/v1/auth/web/login/verify", headers=origin, json={
+            "challenge_id": "challenge-012345678901234567890123",
+            "email": "user@example.com", "password": "Senha123!", "code": "123456",
+        })
+        assert login.status_code == 200
+        assert "refresh_token" not in login.json()
+        assert "HttpOnly" in login.headers["set-cookie"]
+        assert "Secure" in login.headers["set-cookie"]
+        assert "SameSite=none" in login.headers["set-cookie"]
+        refresh = client.post("/v1/auth/web/token/refresh", headers=origin)
+        assert refresh.status_code == 200
+        assert "refresh_token" not in refresh.json()
+        logout = client.post("/v1/auth/web/logout", headers=origin)
+        assert logout.status_code == 204
+        assert "Max-Age=0" in logout.headers["set-cookie"]
+        assert client.post("/v1/auth/web/token/refresh", headers=origin).status_code == 401
+
+
+def test_web_session_rejects_untrusted_origin_and_invalid_otp() -> None:
+    with build_client() as client:
+        assert client.post("/v1/auth/web/logout").status_code == 403
+        assert client.post("/v1/auth/web/logout", headers={"Origin": "https://evil.example"}).status_code == 403
+        response = client.post("/v1/auth/web/login/verify", headers={"Origin": "http://localhost:5173"}, json={
+            "challenge_id": "challenge-012345678901234567890123",
+            "email": "user@example.com", "password": "Senha123!", "code": "000000",
+        })
+        assert response.status_code == 401
+
+
+def test_web_origin_configuration() -> None:
+    assert Settings(environment="production", ouros_web_allowed_origins="").web_allowed_origins == []
+    assert Settings(environment="development", ouros_web_allowed_origins="").web_allowed_origins == ["http://localhost:5173"]
+    assert Settings(ouros_web_allowed_origins=" https://a.example/, ,https://b.example ").web_allowed_origins == ["https://a.example", "https://b.example"]
 
 
 def test_health_is_liveness_only() -> None:
