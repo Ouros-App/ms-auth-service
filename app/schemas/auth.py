@@ -116,6 +116,16 @@ class KeycloakTokenResponse(BaseModel):
     scope: str | None = None
 
 
+class WebAccessTokenResponse(BaseModel):
+    """Short-lived browser token; the refresh token is kept in an HttpOnly cookie."""
+
+    access_token: str = Field(min_length=1)
+    expires_in: int = Field(gt=0)
+    refresh_expires_in: int | None = Field(default=None, ge=0)
+    token_type: Literal["Bearer"]
+    scope: str | None = None
+
+
 CREDENTIAL_COMPLEXITY_PATTERN = re.compile(
     r"(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,20}"
 )
