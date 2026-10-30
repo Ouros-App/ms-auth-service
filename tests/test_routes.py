@@ -153,6 +153,7 @@ def build_client(
 def test_web_session_login_refresh_and_logout() -> None:
     origin = {"Origin": "https://web.example.com"}
     with build_client(environment="production", origins="https://web.example.com/") as client:
+        client.base_url = "https://testserver"
         preflight = client.options("/v1/auth/web/token/refresh", headers={
             **origin, "Access-Control-Request-Method": "POST"
         })
