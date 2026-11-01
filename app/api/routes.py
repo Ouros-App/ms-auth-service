@@ -128,15 +128,25 @@ def require_web_origin(request: Request, settings: Settings) -> None:
         )
 
 
+def is_secure_request(request: Request | None, settings: Settings) -> bool:
+    """Determine whether cookies should carry Secure and SameSite=None."""
+    if request is not None:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme).lower()
+        if proto == "https":
+            return True
+    return settings.environment.lower() not in {"development", "dev", "local"}
+
+
 def set_web_refresh_cookie(
     response: Response,
     token: KeycloakTokenResponse,
     settings: Settings,
+    request: Request | None = None,
 ) -> None:
     """Store the rotated refresh token in a browser-inaccessible cookie."""
     if not token.refresh_token:
         return
-    secure = settings.environment.lower() not in {"development", "dev", "local"}
+    secure = is_secure_request(request, settings)
     response.set_cookie(
         key=WEB_REFRESH_COOKIE,
         value=token.refresh_token,
@@ -292,7 +302,7 @@ async def verify_web_login(
     token = await token_broker.issue_password_token(
         TokenLoginRequest(email=payload.email, password=payload.password)
     )
-    set_web_refresh_cookie(response, token, settings)
+    set_web_refresh_cookie(response, token, settings, request)
     return web_access_token_response(token)
 
 
@@ -312,6 +322,13 @@ async def refresh_web_session(
     require_web_origin(request, settings)
     refresh_token = request.cookies.get(WEB_REFRESH_COOKIE)
     if not refresh_token:
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and body.get("refresh_token"):
+                refresh_token = str(body["refresh_token"])
+        except Exception:
+            pass
+    if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Sessão expirada. Faça login novamente.",
@@ -319,7 +336,7 @@ async def refresh_web_session(
     token = await token_broker.refresh_token(
         TokenRefreshRequest(refresh_token=refresh_token)
     )
-    set_web_refresh_cookie(response, token, settings)
+    set_web_refresh_cookie(response, token, settings, request)
     return web_access_token_response(token)
 
 
@@ -336,7 +353,7 @@ async def logout_web_session(
 ) -> Response:
     """Clear the refresh cookie for an allowed web origin."""
     require_web_origin(request, settings)
-    secure = settings.environment.lower() not in {"development", "dev", "local"}
+    secure = is_secure_request(request, settings)
     response.delete_cookie(
         key=WEB_REFRESH_COOKIE,
         httponly=True,
