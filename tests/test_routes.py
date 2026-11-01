@@ -435,3 +435,37 @@ def test_token_refresh_returns_401_for_expired_refresh_token() -> None:
 
     assert response.status_code == 401
     assert response.json() == {"detail": "Credenciais inválidas."}
+
+
+def test_web_session_refresh_via_body_fallback_when_cookie_missing() -> None:
+    origin = {"Origin": "https://web.example.com"}
+    with build_client(environment="production", origins="https://web.example.com") as client:
+        client.base_url = "https://testserver"
+        response = client.post(
+            "/v1/auth/web/token/refresh",
+            headers=origin,
+            json={"refresh_token": "keycloak-signed-refresh-token"},
+        )
+        assert response.status_code == 200
+        assert "access_token" in response.json()
+        assert "refresh_token" not in response.json()
+        assert "set-cookie" in response.headers
+
+
+def test_web_session_sets_secure_cookie_when_forwarded_proto_is_https_in_dev() -> None:
+    origin = {"Origin": "http://localhost:5173", "X-Forwarded-Proto": "https"}
+    with build_client(environment="development", origins="http://localhost:5173") as client:
+        login = client.post(
+            "/v1/auth/web/login/verify",
+            headers=origin,
+            json={
+                "challenge_id": "challenge-012345678901234567890123",
+                "email": "user@example.com",
+                "password": "Senha123!",
+                "code": "123456",
+            },
+        )
+        assert login.status_code == 200
+        set_cookie = login.headers["set-cookie"]
+        assert "Secure" in set_cookie
+        assert "SameSite=none" in set_cookie
