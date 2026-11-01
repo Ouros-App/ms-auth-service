@@ -176,6 +176,31 @@ def test_web_session_login_refresh_and_logout() -> None:
         assert client.post("/v1/auth/web/token/refresh", headers=origin).status_code == 401
 
 
+def test_web_session_with_offline_token_without_max_lifespan() -> None:
+    class OfflineTokenBroker(FakeKeycloakTokenBroker):
+        @staticmethod
+        def _response() -> KeycloakTokenResponse:
+            return FakeKeycloakTokenBroker._response().model_copy(
+                update={"refresh_expires_in": 0}
+            )
+
+    origin = {"Origin": "https://web.example.com"}
+    with build_client(
+        environment="production",
+        origins="https://web.example.com",
+        token_broker=OfflineTokenBroker(),
+    ) as client:
+        client.base_url = "https://testserver"
+        login = client.post("/v1/auth/web/login/verify", headers=origin, json={
+            "challenge_id": "challenge-012345678901234567890123",
+            "email": "user@example.com", "password": "Senha123!", "code": "123456",
+        })
+        assert login.status_code == 200
+        assert "max-age=0" not in login.headers["set-cookie"].lower()
+        assert client.post("/v1/auth/web/token/refresh", headers=origin).status_code == 200
+        assert client.post("/v1/auth/web/token/refresh", headers=origin).status_code == 200
+
+
 def test_web_session_rejects_untrusted_origin_and_invalid_otp() -> None:
     with build_client() as client:
         assert client.post("/v1/auth/web/logout").status_code == 403
