@@ -140,7 +140,9 @@ def set_web_refresh_cookie(
     response.set_cookie(
         key=WEB_REFRESH_COOKIE,
         value=token.refresh_token,
-        max_age=token.refresh_expires_in,
+        # Keycloak may report zero for offline tokens without a maximum lifespan.
+        # Max-Age=0 deletes the cookie; use a browser-session cookie instead.
+        max_age=token.refresh_expires_in or None,
         httponly=True,
         secure=secure,
         samesite="none" if secure else "lax",
