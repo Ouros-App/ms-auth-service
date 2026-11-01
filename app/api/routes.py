@@ -1,3 +1,5 @@
+import logging
+from json import JSONDecodeError
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -33,6 +35,7 @@ from app.services.email_otp import EmailOtpService
 from app.services.keycloak_token_broker import KeycloakTokenBroker
 from app.services.password_reset_service import PasswordResetService
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 WEB_REFRESH_COOKIE = "ouros_web_refresh"
 
@@ -326,8 +329,8 @@ async def refresh_web_session(
             body = await request.json()
             if isinstance(body, dict) and body.get("refresh_token"):
                 refresh_token = str(body["refresh_token"])
-        except Exception:
-            pass
+        except (JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            logger.debug("no json body for web refresh fallback: %s", exc)
     if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
